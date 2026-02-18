@@ -118,6 +118,9 @@ export default function Toolbar({ selectedRange, activeFormatting, canUndo, canR
   const [showDateSubmenu, setShowDateSubmenu] = useState(false);
   const [customFormatInput, setCustomFormatInput] = useState('');
 
+  // Disable formatting buttons if no range is selected
+  const disableFormat = !selectedRange;
+
   const nfMenuRef = useRef<HTMLDivElement>(null);
   const currencyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -381,13 +384,13 @@ export default function Toolbar({ selectedRange, activeFormatting, canUndo, canR
 
       {/* Font style */}
       <div className="toolbar-group">
-        <button className={`toolbar-btn${fmt.bold ? ' toolbar-btn--active' : ''}`} title="Bold" onMouseDown={(e) => e.preventDefault()} onClick={() => withRange(r => onFormat(r, { bold: !fmt.bold }))}>
+        <button className={`toolbar-btn${fmt.bold ? ' toolbar-btn--active' : ''}`} title="Bold" onMouseDown={(e) => e.preventDefault()} onClick={() => withRange(r => onFormat(r, { bold: !fmt.bold }))} disabled={disableFormat}>
           <b>B</b>
         </button>
-        <button className={`toolbar-btn${fmt.italic ? ' toolbar-btn--active' : ''}`} title="Italic" onMouseDown={(e) => e.preventDefault()} onClick={() => withRange(r => onFormat(r, { italic: !fmt.italic }))}>
+        <button className={`toolbar-btn${fmt.italic ? ' toolbar-btn--active' : ''}`} title="Italic" onMouseDown={(e) => e.preventDefault()} onClick={() => withRange(r => onFormat(r, { italic: !fmt.italic }))} disabled={disableFormat}>
           <i>I</i>
         </button>
-        <button className={`toolbar-btn${fmt.underline ? ' toolbar-btn--active' : ''}`} title="Underline" onMouseDown={(e) => e.preventDefault()} onClick={() => withRange(r => onFormat(r, { underline: !fmt.underline }))}>
+        <button className={`toolbar-btn${fmt.underline ? ' toolbar-btn--active' : ''}`} title="Underline" onMouseDown={(e) => e.preventDefault()} onClick={() => withRange(r => onFormat(r, { underline: !fmt.underline }))} disabled={disableFormat}>
           <u>U</u>
         </button>
       </div>

@@ -1,0 +1,95 @@
+#ifndef CELL_H
+#define CELL_H
+
+#include <QString>
+#include <QVariant>
+#include <vector>
+#include <memory>
+#include <unordered_map>
+
+enum class CellType {
+    Empty,
+    Text,
+    Number,
+    Formula,
+    Date,
+    Boolean,
+    Error
+};
+
+enum class HorizontalAlignment {
+    General,  // Auto: numbers right-align, text left-align
+    Left,
+    Center,
+    Right
+};
+
+enum class VerticalAlignment {
+    Top,
+    Middle,
+    Bottom
+};
+
+struct CellStyle {
+    QString fontName = "Arial";
+    int fontSize = 11;
+    bool bold = false;
+    bool italic = false;
+    bool underline = false;
+    bool strikethrough = false;
+    QString foregroundColor = "#000000";
+    QString backgroundColor = "#FFFFFF";
+    HorizontalAlignment hAlign = HorizontalAlignment::General;
+    VerticalAlignment vAlign = VerticalAlignment::Middle;
+    QString numberFormat = "General";
+    int decimalPlaces = 2;
+    bool useThousandsSeparator = false;
+    QString currencyCode = "USD";
+    QString dateFormatId = "mm/dd/yyyy";
+    int columnWidth = 80;
+    int rowHeight = 22;
+};
+
+class Cell {
+public:
+    Cell();
+    ~Cell() = default;
+
+    // Value management
+    void setValue(const QVariant& value);
+    void setFormula(const QString& formula);
+    QVariant getValue() const;
+    QString getFormula() const;
+    CellType getType() const;
+
+    // Styling
+    void setStyle(const CellStyle& style);
+    const CellStyle& getStyle() const;
+
+    // Computed value (for formulas)
+    void setComputedValue(const QVariant& value);
+    QVariant getComputedValue() const;
+
+    // State
+    bool isDirty() const;
+    void setDirty(bool dirty);
+    
+    bool hasError() const;
+    void setError(const QString& error);
+    QString getError() const;
+
+    // Utilities
+    QString toString() const;
+    void clear();
+
+private:
+    QVariant m_value;
+    QString m_formula;
+    QVariant m_computedValue;
+    CellType m_type;
+    CellStyle m_style;
+    bool m_dirty;
+    QString m_error;
+};
+
+#endif // CELL_H

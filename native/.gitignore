@@ -1,0 +1,55 @@
+# Build directories
+build/
+build-*/
+dist/
+*.app/
+*.dmg
+*.exe
+*.dll
+*.so
+*.dylib
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.cmake
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Qt related
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+*.o
+.moc
+.rcc
+
+# Object files
+*.o
+*.a
+*.lib
+
+# Dependencies
+/third_party/
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+
+# Logs
+*.log
