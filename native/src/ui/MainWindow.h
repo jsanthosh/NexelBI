@@ -7,6 +7,7 @@
 #include <QCloseEvent>
 #include <QTabBar>
 #include <QToolButton>
+#include <QJsonArray>
 #include <memory>
 #include <vector>
 
@@ -16,6 +17,7 @@ class FormulaBar;
 class Toolbar;
 class FormatCellsDialog;
 class FindReplaceDialog;
+class ChatPanel;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -64,6 +66,7 @@ private slots:
     void onDuplicateSheet();
     void showSheetContextMenu(const QPoint& pos);
     void onHighlightInvalidCells();
+    void onChatActions(const QJsonArray& actions);
 
 private:
     void createMenuBar();
@@ -86,6 +89,9 @@ private:
     QTabBar* m_sheetTabBar;
     QToolButton* m_addSheetBtn;
     FindReplaceDialog* m_findReplaceDialog = nullptr;
+    ChatPanel* m_chatPanel = nullptr;
+    QDockWidget* m_chatDock = nullptr;
+    QString m_currentFilePath;  // Track the file path for Ctrl+S
 
     // Multi-sheet storage
     std::vector<std::shared_ptr<Spreadsheet>> m_sheets;

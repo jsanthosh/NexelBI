@@ -148,6 +148,30 @@ QVariant SpreadsheetModel::data(const QModelIndex& index, int role) const {
             }
             return alignment;
         }
+        // Custom roles for indent and borders
+        case Qt::UserRole + 10: { // Indent level
+            return cell->getStyle().indentLevel;
+        }
+        case Qt::UserRole + 11: { // Border top
+            const auto& b = cell->getStyle().borderTop;
+            if (b.enabled) return QString("%1,%2").arg(b.width).arg(b.color);
+            return QVariant();
+        }
+        case Qt::UserRole + 12: { // Border bottom
+            const auto& b = cell->getStyle().borderBottom;
+            if (b.enabled) return QString("%1,%2").arg(b.width).arg(b.color);
+            return QVariant();
+        }
+        case Qt::UserRole + 13: { // Border left
+            const auto& b = cell->getStyle().borderLeft;
+            if (b.enabled) return QString("%1,%2").arg(b.width).arg(b.color);
+            return QVariant();
+        }
+        case Qt::UserRole + 14: { // Border right
+            const auto& b = cell->getStyle().borderRight;
+            if (b.enabled) return QString("%1,%2").arg(b.width).arg(b.color);
+            return QVariant();
+        }
         default:
             return QVariant();
     }

@@ -87,6 +87,16 @@ public:
     ConditionalFormatting& getConditionalFormatting() { return m_conditionalFormatting; }
     const ConditionalFormatting& getConditionalFormatting() const { return m_conditionalFormatting; }
 
+    // Merge cells
+    struct MergedRegion {
+        CellRange range;
+    };
+    void mergeCells(const CellRange& range);
+    void unmergeCells(const CellRange& range);
+    const MergedRegion* getMergedRegionAt(int row, int col) const;
+    std::vector<MergedRegion>& getMergedRegions() { return m_mergedRegions; }
+    const std::vector<MergedRegion>& getMergedRegions() const { return m_mergedRegions; }
+
     // Data validation
     struct DataValidationRule {
         CellRange range;
@@ -138,6 +148,7 @@ private:
     std::vector<SpreadsheetTable> m_tables;
     ConditionalFormatting m_conditionalFormatting;
     std::vector<DataValidationRule> m_validationRules;
+    std::vector<MergedRegion> m_mergedRegions;
 
     void recalculate(const CellAddress& addr);
     void recalculateAll();

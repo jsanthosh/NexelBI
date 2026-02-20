@@ -1,6 +1,7 @@
 #include "CsvService.h"
 #include <QFile>
 #include <QTextStream>
+#include <QApplication>
 
 std::shared_ptr<Spreadsheet> CsvService::importFromFile(const QString& filePath) {
     QFile file(filePath);
@@ -13,10 +14,20 @@ std::shared_ptr<Spreadsheet> CsvService::importFromFile(const QString& filePath)
 
     QTextStream stream(&file);
     int row = 0;
+    int maxCol = 0;
+
+    // Pre-allocate row/col count based on file size heuristic
+    qint64 fileSize = file.size();
+    if (fileSize > 10 * 1024 * 1024) { // >10MB
+        int estimatedRows = static_cast<int>(fileSize / 50); // rough: 50 bytes per row
+        spreadsheet->setRowCount(std::max(1000, estimatedRows + 100));
+    }
 
     while (!stream.atEnd()) {
         QString line = stream.readLine();
         QStringList fields = parseCsvLine(line);
+
+        if (fields.size() > maxCol) maxCol = fields.size();
 
         for (int col = 0; col < fields.size(); ++col) {
             QString value = fields[col].trimmed();
@@ -36,14 +47,17 @@ std::shared_ptr<Spreadsheet> CsvService::importFromFile(const QString& filePath)
             }
         }
         row++;
+
+        // Process events periodically to keep UI responsive for large files
+        if (row % 10000 == 0) {
+            QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+        }
     }
 
     file.close();
 
     // Auto-expand row/column count to fit imported data
-    int maxRow = spreadsheet->getMaxRow();
-    int maxCol = spreadsheet->getMaxColumn();
-    spreadsheet->setRowCount(std::max(spreadsheet->getRowCount(), maxRow + 100));
+    spreadsheet->setRowCount(std::max(spreadsheet->getRowCount(), row + 100));
     spreadsheet->setColumnCount(std::max(spreadsheet->getColumnCount(), maxCol + 10));
 
     spreadsheet->setAutoRecalculate(true);

@@ -31,6 +31,9 @@ public:
     void paste();
     void deleteSelection();
     void selectAll() override;
+    void clearAll();
+    void clearContent();
+    void clearFormats();
 
     // Style operations
     void applyBold();
@@ -47,6 +50,17 @@ public:
     // Alignment
     void applyHAlign(HorizontalAlignment align);
     void applyVAlign(VerticalAlignment align);
+
+    // Indent
+    void increaseIndent();
+    void decreaseIndent();
+
+    // Borders
+    void applyBorderStyle(const QString& borderType);
+
+    // Merge cells
+    void mergeCells();
+    void unmergeCells();
 
     // Format painter
     void activateFormatPainter();
@@ -82,6 +96,11 @@ public:
     // Freeze Panes
     void setFrozenRow(int row);
     void setFrozenColumn(int col);
+
+    // Auto Filter
+    void toggleAutoFilter();
+    bool isFilterActive() const { return m_filterActive; }
+    void clearAllFilters();
 
     // UI Operations
     void refreshView();
@@ -119,6 +138,16 @@ private:
     bool m_formatPainterActive = false;
     CellStyle m_copiedStyle;
 
+    // Internal clipboard (retains formatting)
+    struct ClipboardCell {
+        QVariant value;
+        CellStyle style;
+        CellType type;
+        QString formula;
+    };
+    std::vector<std::vector<ClipboardCell>> m_internalClipboard;
+    QString m_internalClipboardText;
+
     // Fill series state
     bool m_fillDragging = false;
     QModelIndex m_fillDragStart;
@@ -127,6 +156,14 @@ private:
 
     // Multi-resize guard
     bool m_resizingMultiple = false;
+
+    // Auto filter state
+    bool m_filterActive = false;
+    int m_filterHeaderRow = 0;
+    CellRange m_filterRange;
+    std::map<int, QSet<QString>> m_columnFilters; // col -> set of visible values (empty = all visible)
+    void applyFilters();
+    void showFilterDropdown(int column);
 
     // Formula edit mode: when active, clicking cells inserts references
     bool m_formulaEditMode = false;

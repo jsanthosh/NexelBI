@@ -16,6 +16,14 @@
 #include <QSet>
 #include <QLineEdit>
 #include <QDate>
+#include <QCheckBox>
+#include <QVBoxLayout>
+#include <QDialogButtonBox>
+#include <QScrollArea>
+#include <QDialog>
+#include <QLabel>
+#include <QPushButton>
+#include <QAbstractButton>
 #include <algorithm>
 
 SpreadsheetView::SpreadsheetView(QWidget* parent)
@@ -106,6 +114,12 @@ void SpreadsheetView::initializeView() {
         "   border-bottom: 1px solid #DADCE0;"
         "}"
     );
+
+    // Ensure corner button (top-left) triggers select all
+    QAbstractButton* cornerButton = findChild<QAbstractButton*>();
+    if (cornerButton) {
+        connect(cornerButton, &QAbstractButton::clicked, this, &QTableView::selectAll);
+    }
 
     // Enable mouse tracking for fill handle cursor changes
     viewport()->setMouseTracking(true);
@@ -227,13 +241,41 @@ void SpreadsheetView::cut() {
 
 void SpreadsheetView::copy() {
     QModelIndexList selected = selectionModel()->selectedIndexes();
-    if (selected.isEmpty()) return;
+    if (selected.isEmpty() || !m_spreadsheet) return;
 
     std::sort(selected.begin(), selected.end(), [](const QModelIndex& a, const QModelIndex& b) {
         if (a.row() != b.row()) return a.row() < b.row();
         return a.column() < b.column();
     });
 
+    // Find bounding box
+    int minRow = selected.first().row(), maxRow = minRow;
+    int minCol = selected.first().column(), maxCol = minCol;
+    for (const auto& idx : selected) {
+        minRow = qMin(minRow, idx.row());
+        maxRow = qMax(maxRow, idx.row());
+        minCol = qMin(minCol, idx.column());
+        maxCol = qMax(maxCol, idx.column());
+    }
+
+    // Build internal clipboard with formatting
+    int rows = maxRow - minRow + 1;
+    int cols = maxCol - minCol + 1;
+    m_internalClipboard.clear();
+    m_internalClipboard.resize(rows, std::vector<ClipboardCell>(cols));
+
+    for (const auto& idx : selected) {
+        int r = idx.row() - minRow;
+        int c = idx.column() - minCol;
+        CellAddress addr(idx.row(), idx.column());
+        auto cell = m_spreadsheet->getCell(addr);
+        m_internalClipboard[r][c].value = cell->getValue();
+        m_internalClipboard[r][c].style = cell->getStyle();
+        m_internalClipboard[r][c].type = cell->getType();
+        m_internalClipboard[r][c].formula = cell->getFormula();
+    }
+
+    // Also set system clipboard text for cross-app paste
     QString data;
     int lastRow = selected.first().row();
     bool firstInRow = true;
@@ -250,6 +292,7 @@ void SpreadsheetView::copy() {
         firstInRow = false;
     }
 
+    m_internalClipboardText = data;
     QApplication::clipboard()->setText(data);
 }
 
@@ -262,25 +305,54 @@ void SpreadsheetView::paste() {
     int startCol = current.column();
 
     std::vector<CellSnapshot> before, after;
-
     m_model->setSuppressUndo(true);
-    QStringList rows = data.split("\n");
-    for (int r = 0; r < rows.size(); ++r) {
-        QStringList cols = rows[r].split("\t");
-        for (int c = 0; c < cols.size(); ++c) {
-            CellAddress addr(startRow + r, startCol + c);
-            before.push_back(m_spreadsheet->takeCellSnapshot(addr));
 
-            QModelIndex index = m_model->index(startRow + r, startCol + c);
-            m_model->setData(index, cols[c]);
+    // Check if system clipboard matches our internal clipboard (same-app paste with formatting)
+    bool useInternalClipboard = !m_internalClipboard.empty() && data == m_internalClipboardText;
 
-            after.push_back(m_spreadsheet->takeCellSnapshot(addr));
+    if (useInternalClipboard) {
+        for (int r = 0; r < static_cast<int>(m_internalClipboard.size()); ++r) {
+            for (int c = 0; c < static_cast<int>(m_internalClipboard[r].size()); ++c) {
+                CellAddress addr(startRow + r, startCol + c);
+                before.push_back(m_spreadsheet->takeCellSnapshot(addr));
+
+                const auto& clipCell = m_internalClipboard[r][c];
+                if (clipCell.type == CellType::Formula && !clipCell.formula.isEmpty()) {
+                    m_spreadsheet->setCellFormula(addr, clipCell.formula);
+                } else if (clipCell.value.isValid() && !clipCell.value.toString().isEmpty()) {
+                    m_spreadsheet->setCellValue(addr, clipCell.value);
+                }
+                // Apply formatting
+                auto cell = m_spreadsheet->getCell(addr);
+                cell->setStyle(clipCell.style);
+
+                after.push_back(m_spreadsheet->takeCellSnapshot(addr));
+            }
+        }
+    } else {
+        // External paste: plain text only
+        QStringList rows = data.split("\n");
+        for (int r = 0; r < rows.size(); ++r) {
+            QStringList cols = rows[r].split("\t");
+            for (int c = 0; c < cols.size(); ++c) {
+                CellAddress addr(startRow + r, startCol + c);
+                before.push_back(m_spreadsheet->takeCellSnapshot(addr));
+
+                QModelIndex index = m_model->index(startRow + r, startCol + c);
+                m_model->setData(index, cols[c]);
+
+                after.push_back(m_spreadsheet->takeCellSnapshot(addr));
+            }
         }
     }
     m_model->setSuppressUndo(false);
 
     m_spreadsheet->getUndoManager().pushCommand(
         std::make_unique<MultiCellEditCommand>(before, after, "Paste"));
+
+    if (m_model) {
+        m_model->resetModel();
+    }
 }
 
 void SpreadsheetView::deleteSelection() {
@@ -605,6 +677,404 @@ void SpreadsheetView::applyTableStyle(int themeIndex) {
     refreshView();
 }
 
+// ============== Auto Filter ==============
+
+void SpreadsheetView::toggleAutoFilter() {
+    if (m_filterActive) {
+        clearAllFilters();
+        return;
+    }
+
+    if (!m_spreadsheet) return;
+
+    QModelIndex current = currentIndex();
+    if (!current.isValid()) return;
+
+    // Detect data region from current cell
+    m_filterRange = detectDataRegion(current.row(), current.column());
+    m_filterHeaderRow = m_filterRange.getStart().row;
+    m_filterActive = true;
+    m_columnFilters.clear();
+
+    // Connect horizontal header clicks to show filter dropdown
+    // (Disconnect any previous connection first)
+    disconnect(horizontalHeader(), &QHeaderView::sectionClicked, this, nullptr);
+    connect(horizontalHeader(), &QHeaderView::sectionClicked, this, [this](int logicalIndex) {
+        if (!m_filterActive) return;
+        int startCol = m_filterRange.getStart().col;
+        int endCol = m_filterRange.getEnd().col;
+        if (logicalIndex >= startCol && logicalIndex <= endCol) {
+            showFilterDropdown(logicalIndex);
+        }
+    });
+
+    viewport()->update();
+}
+
+void SpreadsheetView::clearAllFilters() {
+    m_filterActive = false;
+    m_columnFilters.clear();
+
+    // Unhide all rows
+    int startRow = m_filterRange.getStart().row;
+    int endRow = m_filterRange.getEnd().row;
+    for (int r = startRow; r <= endRow; ++r) {
+        setRowHidden(r, false);
+    }
+
+    disconnect(horizontalHeader(), &QHeaderView::sectionClicked, this, nullptr);
+    viewport()->update();
+}
+
+void SpreadsheetView::showFilterDropdown(int column) {
+    if (!m_spreadsheet) return;
+
+    int dataStartRow = m_filterHeaderRow + 1;
+    int dataEndRow = m_filterRange.getEnd().row;
+
+    // Collect unique values in this column
+    QStringList uniqueValues;
+    QSet<QString> seen;
+    for (int r = dataStartRow; r <= dataEndRow; ++r) {
+        auto val = m_spreadsheet->getCellValue(CellAddress(r, column));
+        QString text = val.toString();
+        if (!seen.contains(text)) {
+            seen.insert(text);
+            uniqueValues.append(text);
+        }
+    }
+    uniqueValues.sort(Qt::CaseInsensitive);
+
+    // Get current filter for this column (if any)
+    QSet<QString> currentFilter;
+    bool hasFilter = m_columnFilters.count(column) > 0;
+    if (hasFilter) {
+        currentFilter = m_columnFilters[column];
+    }
+
+    // Create filter dropdown dialog
+    QDialog dialog(this);
+    dialog.setWindowTitle("Auto Filter");
+    dialog.setMinimumSize(220, 300);
+    dialog.setMaximumSize(300, 450);
+
+    QVBoxLayout* layout = new QVBoxLayout(&dialog);
+
+    // Select All / Clear All buttons
+    QHBoxLayout* btnRow = new QHBoxLayout();
+    QPushButton* selectAllBtn = new QPushButton("Select All", &dialog);
+    QPushButton* clearAllBtn = new QPushButton("Clear All", &dialog);
+    selectAllBtn->setFixedHeight(24);
+    clearAllBtn->setFixedHeight(24);
+    btnRow->addWidget(selectAllBtn);
+    btnRow->addWidget(clearAllBtn);
+    layout->addLayout(btnRow);
+
+    // Scrollable checkbox area
+    QScrollArea* scrollArea = new QScrollArea(&dialog);
+    scrollArea->setWidgetResizable(true);
+    QWidget* scrollWidget = new QWidget();
+    QVBoxLayout* checkLayout = new QVBoxLayout(scrollWidget);
+    checkLayout->setContentsMargins(4, 4, 4, 4);
+    checkLayout->setSpacing(2);
+
+    std::vector<QCheckBox*> checkBoxes;
+
+    // Add "(Blanks)" entry
+    QCheckBox* blanksCheck = new QCheckBox("(Blanks)", scrollWidget);
+    blanksCheck->setChecked(!hasFilter || currentFilter.contains(""));
+    checkLayout->addWidget(blanksCheck);
+    checkBoxes.push_back(blanksCheck);
+
+    for (const QString& val : uniqueValues) {
+        if (val.isEmpty()) continue; // handled by blanks
+        QCheckBox* cb = new QCheckBox(val, scrollWidget);
+        cb->setChecked(!hasFilter || currentFilter.contains(val));
+        checkLayout->addWidget(cb);
+        checkBoxes.push_back(cb);
+    }
+
+    checkLayout->addStretch();
+    scrollArea->setWidget(scrollWidget);
+    layout->addWidget(scrollArea);
+
+    // Connect select/clear all
+    QObject::connect(selectAllBtn, &QPushButton::clicked, [&checkBoxes]() {
+        for (auto* cb : checkBoxes) cb->setChecked(true);
+    });
+    QObject::connect(clearAllBtn, &QPushButton::clicked, [&checkBoxes]() {
+        for (auto* cb : checkBoxes) cb->setChecked(false);
+    });
+
+    // OK / Cancel
+    QDialogButtonBox* buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    layout->addWidget(buttons);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    // Position dialog near the column header
+    int headerX = horizontalHeader()->sectionViewportPosition(column);
+    QPoint globalPos = horizontalHeader()->mapToGlobal(
+        QPoint(headerX, horizontalHeader()->height()));
+    dialog.move(globalPos);
+
+    if (dialog.exec() == QDialog::Accepted) {
+        QSet<QString> selectedValues;
+        // Blanks checkbox
+        if (blanksCheck->isChecked()) {
+            selectedValues.insert("");
+        }
+        for (size_t i = 1; i < checkBoxes.size(); ++i) {
+            if (checkBoxes[i]->isChecked()) {
+                selectedValues.insert(checkBoxes[i]->text());
+            }
+        }
+
+        // Check if all values are selected (no filter needed)
+        bool allSelected = (static_cast<int>(selectedValues.size()) == uniqueValues.size() + 1) ||
+                           (blanksCheck->isChecked() && static_cast<int>(selectedValues.size()) >= uniqueValues.size());
+        // More robust: count total possible values (unique non-empty + blank)
+        int totalPossible = seen.size();
+        if (!seen.contains("")) totalPossible++; // add blank possibility
+
+        if (static_cast<int>(selectedValues.size()) >= totalPossible) {
+            // All selected — remove filter for this column
+            m_columnFilters.erase(column);
+        } else {
+            m_columnFilters[column] = selectedValues;
+        }
+
+        applyFilters();
+    }
+}
+
+void SpreadsheetView::applyFilters() {
+    if (!m_spreadsheet || !m_filterActive) return;
+
+    int dataStartRow = m_filterHeaderRow + 1;
+    int dataEndRow = m_filterRange.getEnd().row;
+
+    for (int r = dataStartRow; r <= dataEndRow; ++r) {
+        bool visible = true;
+        for (const auto& [col, allowedValues] : m_columnFilters) {
+            auto val = m_spreadsheet->getCellValue(CellAddress(r, col));
+            QString text = val.toString();
+            if (!allowedValues.contains(text)) {
+                visible = false;
+                break;
+            }
+        }
+        setRowHidden(r, !visible);
+    }
+
+    viewport()->update();
+}
+
+// ============== Clear Operations ==============
+
+void SpreadsheetView::clearAll() {
+    QModelIndexList selected = selectionModel()->selectedIndexes();
+    if (selected.isEmpty() || !m_spreadsheet) return;
+
+    std::vector<CellSnapshot> before, after;
+    for (const auto& index : selected) {
+        CellAddress addr(index.row(), index.column());
+        before.push_back(m_spreadsheet->takeCellSnapshot(addr));
+        auto cell = m_spreadsheet->getCell(addr);
+        cell->clear();
+        cell->setStyle(CellStyle()); // Reset to default style
+        after.push_back(m_spreadsheet->takeCellSnapshot(addr));
+    }
+
+    m_spreadsheet->getUndoManager().pushCommand(
+        std::make_unique<MultiCellEditCommand>(before, after, "Clear All"));
+
+    if (m_model) m_model->resetModel();
+}
+
+void SpreadsheetView::clearContent() {
+    deleteSelection(); // Already implemented - clears values but keeps formatting
+}
+
+void SpreadsheetView::clearFormats() {
+    if (!m_spreadsheet) return;
+    QModelIndexList selected = selectionModel()->selectedIndexes();
+    if (selected.isEmpty()) return;
+
+    std::vector<CellSnapshot> before, after;
+    for (const auto& index : selected) {
+        CellAddress addr(index.row(), index.column());
+        before.push_back(m_spreadsheet->takeCellSnapshot(addr));
+        auto cell = m_spreadsheet->getCell(addr);
+        cell->setStyle(CellStyle()); // Reset style only, keep value
+        after.push_back(m_spreadsheet->takeCellSnapshot(addr));
+    }
+
+    m_spreadsheet->getUndoManager().pushCommand(
+        std::make_unique<StyleChangeCommand>(before, after));
+
+    if (m_model) m_model->resetModel();
+}
+
+// ============== Indent ==============
+
+void SpreadsheetView::increaseIndent() {
+    applyStyleChange([](CellStyle& s) {
+        s.indentLevel = qMin(s.indentLevel + 1, 10);
+        if (s.hAlign == HorizontalAlignment::General || s.hAlign == HorizontalAlignment::Right || s.hAlign == HorizontalAlignment::Center) {
+            s.hAlign = HorizontalAlignment::Left; // Indent forces left-align like Excel
+        }
+    }, {Qt::TextAlignmentRole, Qt::UserRole + 10});
+}
+
+void SpreadsheetView::decreaseIndent() {
+    applyStyleChange([](CellStyle& s) {
+        s.indentLevel = qMax(s.indentLevel - 1, 0);
+    }, {Qt::UserRole + 10});
+}
+
+// ============== Borders ==============
+
+void SpreadsheetView::applyBorderStyle(const QString& borderType) {
+    if (!m_spreadsheet) return;
+    QModelIndexList selected = selectionModel()->selectedIndexes();
+    if (selected.isEmpty()) return;
+
+    int minRow = INT_MAX, maxRow = 0, minCol = INT_MAX, maxCol = 0;
+    for (const auto& idx : selected) {
+        minRow = qMin(minRow, idx.row());
+        maxRow = qMax(maxRow, idx.row());
+        minCol = qMin(minCol, idx.column());
+        maxCol = qMax(maxCol, idx.column());
+    }
+
+    BorderStyle on;
+    on.enabled = true;
+    on.color = "#000000";
+    on.width = 1;
+
+    BorderStyle off;
+    off.enabled = false;
+
+    auto modifier = [&](CellStyle& s, int row, int col) {
+        if (borderType == "none") {
+            s.borderTop = off;
+            s.borderBottom = off;
+            s.borderLeft = off;
+            s.borderRight = off;
+        } else if (borderType == "all") {
+            s.borderTop = on;
+            s.borderBottom = on;
+            s.borderLeft = on;
+            s.borderRight = on;
+        } else if (borderType == "outside") {
+            if (row == minRow) s.borderTop = on;
+            if (row == maxRow) s.borderBottom = on;
+            if (col == minCol) s.borderLeft = on;
+            if (col == maxCol) s.borderRight = on;
+        } else if (borderType == "bottom") {
+            if (row == maxRow) s.borderBottom = on;
+        } else if (borderType == "top") {
+            if (row == minRow) s.borderTop = on;
+        } else if (borderType == "thick_outside") {
+            BorderStyle thick = on;
+            thick.width = 2;
+            if (row == minRow) s.borderTop = thick;
+            if (row == maxRow) s.borderBottom = thick;
+            if (col == minCol) s.borderLeft = thick;
+            if (col == maxCol) s.borderRight = thick;
+        } else if (borderType == "left") {
+            if (col == minCol) s.borderLeft = on;
+        } else if (borderType == "right") {
+            if (col == maxCol) s.borderRight = on;
+        } else if (borderType == "inside_h") {
+            if (row > minRow) s.borderTop = on;
+            if (row < maxRow) s.borderBottom = on;
+        } else if (borderType == "inside_v") {
+            if (col > minCol) s.borderLeft = on;
+            if (col < maxCol) s.borderRight = on;
+        } else if (borderType == "inside") {
+            if (row > minRow) s.borderTop = on;
+            if (row < maxRow) s.borderBottom = on;
+            if (col > minCol) s.borderLeft = on;
+            if (col < maxCol) s.borderRight = on;
+        }
+    };
+
+    std::vector<CellSnapshot> before, after;
+    for (const auto& idx : selected) {
+        CellAddress addr(idx.row(), idx.column());
+        before.push_back(m_spreadsheet->takeCellSnapshot(addr));
+        auto cell = m_spreadsheet->getCell(addr);
+        CellStyle style = cell->getStyle();
+        modifier(style, idx.row(), idx.column());
+        cell->setStyle(style);
+        after.push_back(m_spreadsheet->takeCellSnapshot(addr));
+    }
+
+    if (!before.empty()) {
+        m_spreadsheet->getUndoManager().pushCommand(
+            std::make_unique<StyleChangeCommand>(before, after));
+    }
+
+    if (m_model) m_model->resetModel();
+}
+
+// ============== Merge Cells ==============
+
+void SpreadsheetView::mergeCells() {
+    if (!m_spreadsheet) return;
+    QModelIndexList selected = selectionModel()->selectedIndexes();
+    if (selected.size() <= 1) return;
+
+    int minRow = INT_MAX, maxRow = 0, minCol = INT_MAX, maxCol = 0;
+    for (const auto& idx : selected) {
+        minRow = qMin(minRow, idx.row());
+        maxRow = qMax(maxRow, idx.row());
+        minCol = qMin(minCol, idx.column());
+        maxCol = qMax(maxCol, idx.column());
+    }
+
+    CellRange range(CellAddress(minRow, minCol), CellAddress(maxRow, maxCol));
+    m_spreadsheet->mergeCells(range);
+
+    // Set span on the QTableView
+    int rowSpan = maxRow - minRow + 1;
+    int colSpan = maxCol - minCol + 1;
+    setSpan(minRow, minCol, rowSpan, colSpan);
+
+    // Center the content in the merged cell
+    auto cell = m_spreadsheet->getCell(CellAddress(minRow, minCol));
+    CellStyle style = cell->getStyle();
+    style.hAlign = HorizontalAlignment::Center;
+    style.vAlign = VerticalAlignment::Middle;
+    cell->setStyle(style);
+
+    if (m_model) m_model->resetModel();
+}
+
+void SpreadsheetView::unmergeCells() {
+    if (!m_spreadsheet) return;
+    QModelIndex current = currentIndex();
+    if (!current.isValid()) return;
+
+    auto* mr = m_spreadsheet->getMergedRegionAt(current.row(), current.column());
+    if (!mr) return;
+
+    int startRow = mr->range.getStart().row;
+    int startCol = mr->range.getStart().col;
+    int endRow = mr->range.getEnd().row;
+    int endCol = mr->range.getEnd().col;
+
+    // Clear span
+    setSpan(startRow, startCol, 1, 1);
+
+    m_spreadsheet->unmergeCells(mr->range);
+
+    if (m_model) m_model->resetModel();
+}
+
 // ============== Context Menu ==============
 
 void SpreadsheetView::showCellContextMenu(const QPoint& pos) {
@@ -613,6 +1083,14 @@ void SpreadsheetView::showCellContextMenu(const QPoint& pos) {
     menu.addAction("Cut", this, &SpreadsheetView::cut, QKeySequence::Cut);
     menu.addAction("Copy", this, &SpreadsheetView::copy, QKeySequence::Copy);
     menu.addAction("Paste", this, &SpreadsheetView::paste, QKeySequence::Paste);
+
+    menu.addSeparator();
+
+    // Clear submenu
+    QMenu* clearMenu = menu.addMenu("Clear");
+    clearMenu->addAction("Clear All", this, &SpreadsheetView::clearAll);
+    clearMenu->addAction("Clear Contents", this, &SpreadsheetView::clearContent);
+    clearMenu->addAction("Clear Formats", this, &SpreadsheetView::clearFormats);
 
     menu.addSeparator();
 
@@ -631,6 +1109,20 @@ void SpreadsheetView::showCellContextMenu(const QPoint& pos) {
     deleteMenu->addSeparator();
     deleteMenu->addAction("Entire row", this, &SpreadsheetView::deleteEntireRow);
     deleteMenu->addAction("Entire column", this, &SpreadsheetView::deleteEntireColumn);
+
+    menu.addSeparator();
+
+    // Merge cells
+    QModelIndexList selected = selectionModel()->selectedIndexes();
+    if (selected.size() > 1) {
+        menu.addAction("Merge && Center", this, &SpreadsheetView::mergeCells);
+    }
+    if (m_spreadsheet) {
+        QModelIndex cur = currentIndex();
+        if (cur.isValid() && m_spreadsheet->getMergedRegionAt(cur.row(), cur.column())) {
+            menu.addAction("Unmerge Cells", this, &SpreadsheetView::unmergeCells);
+        }
+    }
 
     menu.addSeparator();
 
@@ -1278,6 +1770,30 @@ void SpreadsheetView::insertCellReference(const QString& ref) {
 }
 
 void SpreadsheetView::mousePressEvent(QMouseEvent* event) {
+    // Filter button click: check if clicking on a filter dropdown button
+    if (m_filterActive && event->button() == Qt::LeftButton && m_model) {
+        QModelIndex clickedIdx = indexAt(event->pos());
+        if (clickedIdx.isValid() && clickedIdx.row() == m_filterHeaderRow) {
+            int col = clickedIdx.column();
+            int startCol = m_filterRange.getStart().col;
+            int endCol = m_filterRange.getEnd().col;
+            if (col >= startCol && col <= endCol) {
+                QRect cellRect = visualRect(clickedIdx);
+                int btnSize = 16;
+                int margin = 2;
+                QRect btnRect(cellRect.right() - btnSize - margin,
+                              cellRect.top() + (cellRect.height() - btnSize) / 2,
+                              btnSize, btnSize);
+                // Expand hit area slightly for easier clicking
+                if (btnRect.adjusted(-3, -3, 3, 3).contains(event->pos())) {
+                    showFilterDropdown(col);
+                    event->accept();
+                    return;
+                }
+            }
+        }
+    }
+
     // Formula edit mode: clicking a cell inserts its reference
     if (m_formulaEditMode && event->button() == Qt::LeftButton) {
         QModelIndex clickedIdx = indexAt(event->pos());
@@ -1372,6 +1888,43 @@ void SpreadsheetView::paintEvent(QPaintEvent* event) {
             painter.fillRect(m_fillHandleRect, QColor(16, 124, 16));
             painter.setPen(QPen(Qt::white, 1));
             painter.drawRect(m_fillHandleRect);
+        }
+    }
+
+    // Draw filter dropdown buttons on header row cells (Excel-style)
+    if (m_filterActive && m_model) {
+        QPainter filterPainter(viewport());
+        filterPainter.setRenderHint(QPainter::Antialiasing, true);
+        int startCol = m_filterRange.getStart().col;
+        int endCol = m_filterRange.getEnd().col;
+        for (int c = startCol; c <= endCol; ++c) {
+            QModelIndex headerIdx = m_model->index(m_filterHeaderRow, c);
+            QRect cellRect = visualRect(headerIdx);
+            if (cellRect.isNull() || !viewport()->rect().intersects(cellRect)) continue;
+
+            // Draw a dropdown button in the right side of the cell
+            int btnSize = 16;
+            int margin = 2;
+            QRect btnRect(cellRect.right() - btnSize - margin,
+                          cellRect.top() + (cellRect.height() - btnSize) / 2,
+                          btnSize, btnSize);
+
+            bool hasActiveFilter = m_columnFilters.count(c) > 0;
+
+            // Button background
+            filterPainter.setPen(QPen(QColor("#C0C0C0"), 0.5));
+            filterPainter.setBrush(hasActiveFilter ? QColor("#D6E4F0") : QColor("#F0F0F0"));
+            filterPainter.drawRoundedRect(btnRect, 2, 2);
+
+            // Draw small dropdown arrow
+            QColor arrowColor = hasActiveFilter ? QColor("#1B5E3B") : QColor("#555555");
+            filterPainter.setPen(Qt::NoPen);
+            filterPainter.setBrush(arrowColor);
+            int ax = btnRect.center().x();
+            int ay = btnRect.center().y();
+            QPolygonF arrow;
+            arrow << QPointF(ax - 3, ay - 1) << QPointF(ax + 3, ay - 1) << QPointF(ax, ay + 2.5);
+            filterPainter.drawPolygon(arrow);
         }
     }
 

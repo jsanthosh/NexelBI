@@ -30,6 +30,12 @@ enum class VerticalAlignment {
     Bottom
 };
 
+struct BorderStyle {
+    bool enabled = false;
+    QString color = "#000000";
+    int width = 1; // 1=thin, 2=medium, 3=thick
+};
+
 struct CellStyle {
     QString fontName = "Arial";
     int fontSize = 11;
@@ -48,6 +54,13 @@ struct CellStyle {
     QString dateFormatId = "mm/dd/yyyy";
     int columnWidth = 80;
     int rowHeight = 22;
+    // Borders
+    BorderStyle borderTop;
+    BorderStyle borderBottom;
+    BorderStyle borderLeft;
+    BorderStyle borderRight;
+    // Indent
+    int indentLevel = 0;
 };
 
 class Cell {

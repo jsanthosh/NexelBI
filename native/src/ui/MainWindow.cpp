@@ -8,6 +8,7 @@
 #include "GoToDialog.h"
 #include "ConditionalFormatDialog.h"
 #include "DataValidationDialog.h"
+#include "ChatPanel.h"
 #include "../core/Spreadsheet.h"
 #include "../core/UndoManager.h"
 #include "../core/CellRange.h"
@@ -28,6 +29,9 @@
 #include <QTabBar>
 #include <QToolButton>
 #include <QScrollBar>
+#include <QDockWidget>
+#include <QJsonObject>
+#include <QJsonArray>
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent) {
@@ -47,6 +51,9 @@ MainWindow::MainWindow(QWidget* parent)
 
     m_toolbar = new Toolbar(this);
     addToolBar(m_toolbar);
+    addToolBarBreak(Qt::TopToolBarArea);
+    QToolBar* toolbar2 = m_toolbar->createSecondaryToolbar(this);
+    addToolBar(toolbar2);
 
     m_formulaBar = new FormulaBar(this);
     layout->addWidget(m_formulaBar);
@@ -61,6 +68,21 @@ MainWindow::MainWindow(QWidget* parent)
 
     setCentralWidget(centralWidget);
 
+    // Chat assistant panel (dock widget on the right) — created before menu bar so menu can connect
+    m_chatPanel = new ChatPanel(this);
+    m_chatPanel->setSpreadsheet(m_sheets[0]);
+    m_chatDock = new QDockWidget("Claude Assistant", this);
+    m_chatDock->setWidget(m_chatPanel);
+    m_chatDock->setFeatures(QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable);
+    m_chatDock->setMinimumWidth(300);
+    m_chatDock->setStyleSheet(
+        "QDockWidget { border: none; }"
+        "QDockWidget::title { background: #1B5E3B; color: white; padding: 6px; font-weight: bold; text-align: center; }"
+        "QDockWidget::close-button { background: transparent; }"
+    );
+    addDockWidget(Qt::RightDockWidgetArea, m_chatDock);
+    m_chatDock->hide(); // Hidden by default, toggled from View menu
+
     createMenuBar();
     createStatusBar();
     connectSignals();
@@ -68,13 +90,14 @@ MainWindow::MainWindow(QWidget* parent)
     setAcceptDrops(true);
 
     setStyleSheet(
-        "QMainWindow { background-color: #F3F3F3; }"
-        "QMenuBar { background-color: #217346; color: white; border: none; padding: 2px; font-size: 12px; }"
-        "QMenuBar::item { padding: 4px 10px; }"
-        "QMenuBar::item:selected { background-color: #1a5c38; border-radius: 2px; }"
-        "QMenu { background-color: #FFFFFF; border: 1px solid #D0D0D0; }"
-        "QMenu::item { padding: 6px 30px 6px 20px; }"
+        "QMainWindow { background-color: #F0F2F5; }"
+        "QMenuBar { background-color: #1B5E3B; color: white; border: none; padding: 2px; font-size: 12px; }"
+        "QMenuBar::item { padding: 4px 12px; border-radius: 3px; }"
+        "QMenuBar::item:selected { background-color: #155030; }"
+        "QMenu { background-color: #FFFFFF; border: 1px solid #D0D5DD; border-radius: 6px; padding: 4px; }"
+        "QMenu::item { padding: 6px 30px 6px 20px; border-radius: 4px; }"
         "QMenu::item:selected { background-color: #E8F0FE; }"
+        "QMenu::separator { height: 1px; background: #E0E3E8; margin: 4px 8px; }"
     );
 }
 
@@ -156,6 +179,7 @@ void MainWindow::switchToSheet(int index) {
     m_activeSheetIndex = index;
     m_spreadsheetView->setSpreadsheet(m_sheets[index]);
     m_spreadsheetView->refreshView();
+    if (m_chatPanel) m_chatPanel->setSpreadsheet(m_sheets[index]);
 
     // Reset scroll position and focus to A1
     QModelIndex first = m_spreadsheetView->getModel()->index(0, 0);
@@ -346,6 +370,18 @@ void MainWindow::createMenuBar() {
     QMenu* viewMenu = menuBar->addMenu("&View");
     viewMenu->addAction("&Freeze Panes", QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_F),
                          this, &MainWindow::onFreezePane);
+    viewMenu->addSeparator();
+    QAction* chatAction = viewMenu->addAction("&Claude Assistant");
+    chatAction->setCheckable(true);
+    chatAction->setChecked(false);
+    connect(chatAction, &QAction::toggled, this, [this](bool checked) {
+        if (checked) {
+            m_chatDock->show();
+        } else {
+            m_chatDock->hide();
+        }
+    });
+    connect(m_chatDock, &QDockWidget::visibilityChanged, chatAction, &QAction::setChecked);
 }
 
 void MainWindow::createToolBar() {}
@@ -384,10 +420,31 @@ void MainWindow::connectSignals() {
 
     connect(m_toolbar, &Toolbar::sortAscending, m_spreadsheetView, &SpreadsheetView::sortAscending);
     connect(m_toolbar, &Toolbar::sortDescending, m_spreadsheetView, &SpreadsheetView::sortDescending);
+    connect(m_toolbar, &Toolbar::filterToggled, m_spreadsheetView, &SpreadsheetView::toggleAutoFilter);
 
     connect(m_toolbar, &Toolbar::tableStyleSelected, m_spreadsheetView, &SpreadsheetView::applyTableStyle);
+
+    connect(m_toolbar, &Toolbar::borderStyleSelected, m_spreadsheetView, &SpreadsheetView::applyBorderStyle);
+    connect(m_toolbar, &Toolbar::mergeCellsRequested, m_spreadsheetView, &SpreadsheetView::mergeCells);
+    connect(m_toolbar, &Toolbar::unmergeCellsRequested, m_spreadsheetView, &SpreadsheetView::unmergeCells);
+    connect(m_toolbar, &Toolbar::increaseIndent, m_spreadsheetView, &SpreadsheetView::increaseIndent);
+    connect(m_toolbar, &Toolbar::decreaseIndent, m_spreadsheetView, &SpreadsheetView::decreaseIndent);
+
     connect(m_toolbar, &Toolbar::conditionalFormatRequested, this, &MainWindow::onConditionalFormat);
     connect(m_toolbar, &Toolbar::dataValidationRequested, this, &MainWindow::onDataValidation);
+
+    // Chat assistant toggle
+    connect(m_toolbar, &Toolbar::chatToggleRequested, this, [this]() {
+        if (m_chatDock->isVisible()) {
+            m_chatDock->hide();
+        } else {
+            m_chatDock->show();
+            m_chatDock->raise();
+        }
+    });
+
+    // Chat NLP actions
+    connect(m_chatPanel, &ChatPanel::executeActions, this, &MainWindow::onChatActions);
 
     connect(m_spreadsheetView, &SpreadsheetView::formatCellsRequested, this, &MainWindow::onFormatCells);
 
@@ -467,6 +524,7 @@ void MainWindow::onFormatCells() {
 void MainWindow::openFile(const QString& fileName) {
     if (fileName.isEmpty()) return;
 
+    m_currentFilePath = fileName;
     QString ext = QFileInfo(fileName).suffix().toLower();
 
     if (ext == "xlsx" || ext == "xls") {
@@ -517,20 +575,45 @@ void MainWindow::onOpenDocument() {
 }
 
 void MainWindow::onSaveDocument() {
-    if (!saveCurrentDocument()) {
-        statusBar()->showMessage("Failed to save document");
+    if (m_currentFilePath.isEmpty()) {
+        onSaveAs();
+        return;
+    }
+
+    QString ext = QFileInfo(m_currentFilePath).suffix().toLower();
+    bool success = false;
+
+    if (ext == "xlsx" || ext == "xls") {
+        success = XlsxService::exportToFile(m_sheets, m_currentFilePath);
     } else {
-        statusBar()->showMessage("Document saved");
+        auto spreadsheet = m_spreadsheetView->getSpreadsheet();
+        if (spreadsheet) success = CsvService::exportToFile(*spreadsheet, m_currentFilePath);
+    }
+
+    if (success) {
+        statusBar()->showMessage("Saved: " + m_currentFilePath);
+    } else {
+        QMessageBox::warning(this, "Save Failed", "Could not save file.");
     }
 }
 
 void MainWindow::onSaveAs() {
     QString fileName = QFileDialog::getSaveFileName(this, "Save Document As", "",
-        "CSV Files (*.csv);;All Files (*)");
+        "Excel Workbook (*.xlsx);;CSV Files (*.csv);;All Files (*)");
     if (fileName.isEmpty()) return;
 
-    auto spreadsheet = m_spreadsheetView->getSpreadsheet();
-    if (spreadsheet && CsvService::exportToFile(*spreadsheet, fileName)) {
+    QString ext = QFileInfo(fileName).suffix().toLower();
+    bool success = false;
+
+    if (ext == "xlsx") {
+        success = XlsxService::exportToFile(m_sheets, fileName);
+    } else {
+        auto spreadsheet = m_spreadsheetView->getSpreadsheet();
+        if (spreadsheet) success = CsvService::exportToFile(*spreadsheet, fileName);
+    }
+
+    if (success) {
+        m_currentFilePath = fileName;
         setWindowTitle("NativeSpreadsheet - " + QFileInfo(fileName).fileName());
         statusBar()->showMessage("Saved: " + fileName);
     } else {
@@ -1004,6 +1087,231 @@ void MainWindow::updateStatusBarSummary() {
     } else {
         statusBar()->showMessage("Ready");
     }
+}
+
+// ============== Chat NLP Actions ==============
+
+static CellAddress parseCellRef(const QString& ref) {
+    int col = 0;
+    int i = 0;
+    while (i < ref.length() && ref[i].isLetter()) {
+        col = col * 26 + (ref[i].toUpper().unicode() - 'A' + 1);
+        i++;
+    }
+    col--; // 0-indexed
+    int row = ref.mid(i).toInt() - 1; // 0-indexed
+    return CellAddress(qMax(0, row), qMax(0, col));
+}
+
+static CellAddress parseRangeStart(const QString& rangeStr) {
+    QStringList parts = rangeStr.split(':');
+    return parseCellRef(parts[0]);
+}
+
+static CellAddress parseRangeEnd(const QString& rangeStr) {
+    QStringList parts = rangeStr.split(':');
+    return (parts.size() > 1) ? parseCellRef(parts[1]) : parseCellRef(parts[0]);
+}
+
+static int parseColLetter(const QString& col) {
+    int result = 0;
+    for (int i = 0; i < col.length(); ++i) {
+        result = result * 26 + (col[i].toUpper().unicode() - 'A' + 1);
+    }
+    return result - 1;
+}
+
+void MainWindow::onChatActions(const QJsonArray& actions) {
+    if (!m_spreadsheetView || m_sheets.empty()) return;
+
+    auto sheet = m_sheets[m_activeSheetIndex];
+    if (!sheet) return;
+
+    for (const auto& item : actions) {
+        QJsonObject action = item.toObject();
+        QString type = action["action"].toString();
+
+        if (type == "set_cell") {
+            QString cellRef = action["cell"].toString();
+            QJsonValue val = action["value"];
+            CellAddress addr = parseCellRef(cellRef);
+            auto cell = sheet->getCell(addr);
+            if (val.isDouble()) {
+                cell->setValue(val.toDouble());
+            } else {
+                cell->setValue(val.toString());
+            }
+
+        } else if (type == "set_formula") {
+            QString cellRef = action["cell"].toString();
+            QString formula = action["formula"].toString();
+            CellAddress addr = parseCellRef(cellRef);
+            sheet->setCellFormula(addr, formula);
+
+        } else if (type == "format") {
+            CellAddress start = parseRangeStart(action["range"].toString());
+            CellAddress end = parseRangeEnd(action["range"].toString());
+
+            for (int r = start.row; r <= end.row; ++r) {
+                for (int c = start.col; c <= end.col; ++c) {
+                    CellAddress addr(r, c);
+                    auto cell = sheet->getCell(addr);
+                    CellStyle style = cell->getStyle();
+
+                    if (action.contains("bold")) style.bold = action["bold"].toBool();
+                    if (action.contains("italic")) style.italic = action["italic"].toBool();
+                    if (action.contains("underline")) style.underline = action["underline"].toBool();
+                    if (action.contains("strikethrough")) style.strikethrough = action["strikethrough"].toBool();
+                    if (action.contains("bg_color")) style.backgroundColor = action["bg_color"].toString();
+                    if (action.contains("fg_color")) style.foregroundColor = action["fg_color"].toString();
+                    if (action.contains("font_size")) style.fontSize = action["font_size"].toInt();
+                    if (action.contains("font_name")) style.fontName = action["font_name"].toString();
+                    if (action.contains("h_align")) {
+                        QString align = action["h_align"].toString();
+                        if (align == "left") style.hAlign = HorizontalAlignment::Left;
+                        else if (align == "center") style.hAlign = HorizontalAlignment::Center;
+                        else if (align == "right") style.hAlign = HorizontalAlignment::Right;
+                    }
+                    if (action.contains("v_align")) {
+                        QString align = action["v_align"].toString();
+                        if (align == "top") style.vAlign = VerticalAlignment::Top;
+                        else if (align == "middle") style.vAlign = VerticalAlignment::Middle;
+                        else if (align == "bottom") style.vAlign = VerticalAlignment::Bottom;
+                    }
+
+                    cell->setStyle(style);
+                }
+            }
+
+        } else if (type == "merge") {
+            CellAddress start = parseRangeStart(action["range"].toString());
+            CellAddress end = parseRangeEnd(action["range"].toString());
+            CellRange range(start, end);
+            sheet->mergeCells(range);
+            int rowSpan = end.row - start.row + 1;
+            int colSpan = end.col - start.col + 1;
+            m_spreadsheetView->setSpan(start.row, start.col, rowSpan, colSpan);
+            // Center merged content
+            auto cell = sheet->getCell(start);
+            CellStyle style = cell->getStyle();
+            style.hAlign = HorizontalAlignment::Center;
+            style.vAlign = VerticalAlignment::Middle;
+            cell->setStyle(style);
+
+        } else if (type == "unmerge") {
+            CellAddress start = parseRangeStart(action["range"].toString());
+            CellAddress end = parseRangeEnd(action["range"].toString());
+            CellRange range(start, end);
+            m_spreadsheetView->setSpan(start.row, start.col, 1, 1);
+            sheet->unmergeCells(range);
+
+        } else if (type == "border") {
+            QString borderType = action["type"].toString();
+            CellAddress start = parseRangeStart(action["range"].toString());
+            CellAddress end = parseRangeEnd(action["range"].toString());
+
+            BorderStyle on;
+            on.enabled = true;
+            on.color = "#000000";
+            on.width = (borderType == "thick_outside") ? 2 : 1;
+
+            BorderStyle off;
+            off.enabled = false;
+
+            for (int r = start.row; r <= end.row; ++r) {
+                for (int c = start.col; c <= end.col; ++c) {
+                    CellAddress addr(r, c);
+                    auto cell = sheet->getCell(addr);
+                    CellStyle style = cell->getStyle();
+
+                    if (borderType == "none") {
+                        style.borderTop = off; style.borderBottom = off;
+                        style.borderLeft = off; style.borderRight = off;
+                    } else if (borderType == "all") {
+                        style.borderTop = on; style.borderBottom = on;
+                        style.borderLeft = on; style.borderRight = on;
+                    } else if (borderType == "outside" || borderType == "thick_outside") {
+                        if (r == start.row) style.borderTop = on;
+                        if (r == end.row) style.borderBottom = on;
+                        if (c == start.col) style.borderLeft = on;
+                        if (c == end.col) style.borderRight = on;
+                    } else if (borderType == "bottom") {
+                        if (r == end.row) style.borderBottom = on;
+                    } else if (borderType == "top") {
+                        if (r == start.row) style.borderTop = on;
+                    } else if (borderType == "left") {
+                        if (c == start.col) style.borderLeft = on;
+                    } else if (borderType == "right") {
+                        if (c == end.col) style.borderRight = on;
+                    }
+
+                    cell->setStyle(style);
+                }
+            }
+
+        } else if (type == "table") {
+            CellAddress start = parseRangeStart(action["range"].toString());
+            CellAddress end = parseRangeEnd(action["range"].toString());
+            int themeIdx = action["theme"].toInt();
+            auto themes = getBuiltinTableThemes();
+            if (themeIdx >= 0 && themeIdx < static_cast<int>(themes.size())) {
+                SpreadsheetTable table;
+                table.range = CellRange(start, end);
+                table.theme = themes[themeIdx];
+                table.hasHeaderRow = true;
+                table.bandedRows = true;
+                int tableNum = static_cast<int>(sheet->getTables().size()) + 1;
+                table.name = QString("Table%1").arg(tableNum);
+                for (int c = start.col; c <= end.col; ++c) {
+                    auto val = sheet->getCellValue(CellAddress(start.row, c));
+                    QString name = val.toString();
+                    if (name.isEmpty()) name = QString("Column%1").arg(c - start.col + 1);
+                    table.columnNames.append(name);
+                }
+                sheet->addTable(table);
+            }
+
+        } else if (type == "number_format") {
+            CellAddress start = parseRangeStart(action["range"].toString());
+            CellAddress end = parseRangeEnd(action["range"].toString());
+            QString fmt = action["format"].toString();
+            for (int r = start.row; r <= end.row; ++r) {
+                for (int c = start.col; c <= end.col; ++c) {
+                    auto cell = sheet->getCell(CellAddress(r, c));
+                    CellStyle style = cell->getStyle();
+                    style.numberFormat = fmt;
+                    cell->setStyle(style);
+                }
+            }
+
+        } else if (type == "set_row_height") {
+            int row = action["row"].toInt() - 1; // 1-based to 0-based
+            int height = action["height"].toInt();
+            if (row >= 0 && height > 0) {
+                m_spreadsheetView->setRowHeight(row, height);
+            }
+
+        } else if (type == "set_col_width") {
+            QString colStr = action["col"].toString();
+            int col = parseColLetter(colStr);
+            int width = action["width"].toInt();
+            if (col >= 0 && width > 0) {
+                m_spreadsheetView->setColumnWidth(col, width);
+            }
+
+        } else if (type == "clear") {
+            CellAddress start = parseRangeStart(action["range"].toString());
+            CellAddress end = parseRangeEnd(action["range"].toString());
+            CellRange range(start, end);
+            sheet->clearRange(range);
+        }
+    }
+
+    // Refresh the view
+    m_spreadsheetView->refreshView();
+    if (m_spreadsheetView->getModel())
+        m_spreadsheetView->getModel()->resetModel();
+    statusBar()->showMessage(QString("Claude applied %1 action(s)").arg(actions.size()), 5000);
 }
 
 bool MainWindow::saveCurrentDocument() {

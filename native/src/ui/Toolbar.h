@@ -15,6 +15,9 @@ class Toolbar : public QToolBar {
 public:
     explicit Toolbar(QWidget* parent = nullptr);
 
+    // Creates and returns a second toolbar for row 2 (layout, borders, data, chat)
+    QToolBar* createSecondaryToolbar(QWidget* parent);
+
 signals:
     // File
     void newDocument();
@@ -47,9 +50,19 @@ signals:
     void filterToggled();
     // Tables
     void tableStyleSelected(int themeIndex);
+    // Borders
+    void borderStyleSelected(const QString& borderType);
+    // Merge cells
+    void mergeCellsRequested();
+    void unmergeCellsRequested();
+    // Indent
+    void increaseIndent();
+    void decreaseIndent();
     // Conditional formatting & validation
     void conditionalFormatRequested();
     void dataValidationRequested();
+    // Chat assistant
+    void chatToggleRequested();
 
 private:
     void createActions();

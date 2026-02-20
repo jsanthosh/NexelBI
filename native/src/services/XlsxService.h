@@ -14,7 +14,23 @@ public:
     // Returns a vector of sheets (one per worksheet in the xlsx file)
     static std::vector<std::shared_ptr<Spreadsheet>> importFromFile(const QString& filePath);
 
+    // Export sheets to XLSX with all formatting
+    static bool exportToFile(const std::vector<std::shared_ptr<Spreadsheet>>& sheets, const QString& filePath);
+
 private:
+    // Export helpers
+    static QString columnIndexToLetter(int col);
+    static QByteArray generateContentTypes(int sheetCount);
+    static QByteArray generateRels();
+    static QByteArray generateWorkbook(const std::vector<std::shared_ptr<Spreadsheet>>& sheets);
+    static QByteArray generateWorkbookRels(int sheetCount);
+    static QByteArray generateStyles(const std::vector<std::shared_ptr<Spreadsheet>>& sheets,
+                                      std::map<QString, int>& styleIndexMap);
+    static QByteArray generateSheet(Spreadsheet* sheet, const std::map<QString, int>& styleIndexMap,
+                                     QStringList& sharedStrings);
+    static QByteArray generateSharedStrings(const QStringList& sharedStrings);
+    static QString cellStyleKey(const CellStyle& style);
+
     struct SheetInfo {
         QString name;
         QString rId;
@@ -53,14 +69,17 @@ private:
     static std::vector<XlsxFont> parseFonts(const QByteArray& stylesXml);
     static std::vector<XlsxFill> parseFills(const QByteArray& stylesXml);
     static std::vector<XlsxCellXf> parseCellXfs(const QByteArray& stylesXml);
+    static std::map<int, QString> parseNumFmts(const QByteArray& stylesXml);
     static CellStyle buildCellStyle(const XlsxCellXf& xf,
                                      const std::vector<XlsxFont>& fonts,
                                      const std::vector<XlsxFill>& fills,
-                                     int numFmtId);
+                                     int numFmtId,
+                                     const std::map<int, QString>& customNumFmts);
     static void parseSheet(const QByteArray& xmlData, const QStringList& sharedStrings,
                            const std::vector<CellStyle>& styles, Spreadsheet* sheet);
     static int columnLetterToIndex(const QString& letters);
-    static QString mapNumFmtId(int id);
+    static QString mapNumFmtId(int id, const std::map<int, QString>& customNumFmts);
+    static bool isDateFormatCode(const QString& formatCode);
 };
 
 #endif // XLSXSERVICE_H

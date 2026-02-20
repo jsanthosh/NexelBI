@@ -7,6 +7,9 @@
 #include <QStringListModel>
 #include <QAbstractItemView>
 #include <QListView>
+#include <QKeyEvent>
+#include <QTableView>
+#include <QTimer>
 
 // All supported formula function names
 static const QStringList s_formulaNames = {
@@ -21,6 +24,49 @@ static const QStringList s_formulaNames = {
 
 CellDelegate::CellDelegate(QObject* parent)
     : QStyledItemDelegate(parent) {
+}
+
+bool CellDelegate::eventFilter(QObject* object, QEvent* event) {
+    if (event->type() == QEvent::KeyPress) {
+        QKeyEvent* keyEvent = static_cast<QKeyEvent*>(event);
+        // Arrow keys during editing: commit and move (like Excel)
+        if (keyEvent->key() == Qt::Key_Up || keyEvent->key() == Qt::Key_Down ||
+            keyEvent->key() == Qt::Key_Left || keyEvent->key() == Qt::Key_Right) {
+            QLineEdit* editor = qobject_cast<QLineEdit*>(object);
+            if (editor) {
+                // Left/Right: only commit if cursor is at boundary
+                if (keyEvent->key() == Qt::Key_Left && editor->cursorPosition() > 0)
+                    return QStyledItemDelegate::eventFilter(object, event);
+                if (keyEvent->key() == Qt::Key_Right && editor->cursorPosition() < editor->text().length())
+                    return QStyledItemDelegate::eventFilter(object, event);
+
+                emit commitData(editor);
+                emit closeEditor(editor, QAbstractItemDelegate::NoHint);
+
+                // Navigate to adjacent cell after editor closes
+                int key = keyEvent->key();
+                QWidget* viewport = editor->parentWidget();
+                QTableView* view = viewport ? qobject_cast<QTableView*>(viewport->parentWidget()) : nullptr;
+                if (view) {
+                    QTimer::singleShot(0, view, [view, key]() {
+                        QModelIndex cur = view->currentIndex();
+                        if (!cur.isValid() || !view->model()) return;
+                        int row = cur.row(), col = cur.column();
+                        if (key == Qt::Key_Up) row = qMax(0, row - 1);
+                        else if (key == Qt::Key_Down) row = qMin(view->model()->rowCount() - 1, row + 1);
+                        else if (key == Qt::Key_Left) col = qMax(0, col - 1);
+                        else if (key == Qt::Key_Right) col = qMin(view->model()->columnCount() - 1, col + 1);
+                        QModelIndex next = view->model()->index(row, col);
+                        if (next.isValid()) {
+                            view->setCurrentIndex(next);
+                        }
+                    });
+                }
+                return true; // consume the event
+            }
+        }
+    }
+    return QStyledItemDelegate::eventFilter(object, event);
 }
 
 QWidget* CellDelegate::createEditor(QWidget* parent, const QStyleOptionViewItem& option,
@@ -161,7 +207,14 @@ void CellDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option,
             alignment = alignData.toInt();
         }
 
-        QRect textRect = rect.adjusted(4, 1, -4, -1);
+        // Indent support: add left padding per indent level
+        int indentPx = 0;
+        QVariant indentData = index.data(Qt::UserRole + 10);
+        if (indentData.isValid()) {
+            indentPx = indentData.toInt() * 12; // 12px per indent level
+        }
+
+        QRect textRect = rect.adjusted(4 + indentPx, 1, -4, -1);
         painter->drawText(textRect, alignment, text);
     }
 
@@ -169,6 +222,24 @@ void CellDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option,
     painter->setPen(QPen(QColor(218, 220, 224), 1, Qt::SolidLine));
     painter->drawLine(rect.right(), rect.top(), rect.right(), rect.bottom());
     painter->drawLine(rect.left(), rect.bottom(), rect.right(), rect.bottom());
+
+    // --- Cell borders (user-defined) ---
+    auto drawBorder = [&](const QVariant& borderData, int x1, int y1, int x2, int y2) {
+        if (!borderData.isValid()) return;
+        QStringList parts = borderData.toString().split(',');
+        if (parts.size() >= 2) {
+            int w = parts[0].toInt();
+            QColor c(parts[1]);
+            if (c.isValid() && w > 0) {
+                painter->setPen(QPen(c, w, Qt::SolidLine));
+                painter->drawLine(x1, y1, x2, y2);
+            }
+        }
+    };
+    drawBorder(index.data(Qt::UserRole + 11), rect.left(), rect.top(), rect.right(), rect.top());      // top
+    drawBorder(index.data(Qt::UserRole + 12), rect.left(), rect.bottom(), rect.right(), rect.bottom()); // bottom
+    drawBorder(index.data(Qt::UserRole + 13), rect.left(), rect.top(), rect.left(), rect.bottom());     // left
+    drawBorder(index.data(Qt::UserRole + 14), rect.right(), rect.top(), rect.right(), rect.bottom());   // right
 
     // --- Focus border: green rectangle for the current cell ---
     if (hasFocus) {

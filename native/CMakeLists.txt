@@ -103,6 +103,8 @@ set(UI_SOURCES
     src/ui/ConditionalFormatDialog.h
     src/ui/DataValidationDialog.cpp
     src/ui/DataValidationDialog.h
+    src/ui/ChatPanel.cpp
+    src/ui/ChatPanel.h
 )
 
 # Main Application
@@ -142,12 +144,18 @@ target_include_directories(NativeSpreadsheet PRIVATE
 
 # macOS specific settings
 if(APPLE)
+    set(MACOSX_BUNDLE_ICON_FILE AppIcon.icns)
+    set(APP_ICON_MACOSX ${CMAKE_CURRENT_SOURCE_DIR}/resources/AppIcon.icns)
+    set_source_files_properties(${APP_ICON_MACOSX} PROPERTIES
+        MACOSX_PACKAGE_LOCATION "Resources")
+    target_sources(NativeSpreadsheet PRIVATE ${APP_ICON_MACOSX})
     set_target_properties(NativeSpreadsheet PROPERTIES
         MACOSX_BUNDLE TRUE
         MACOSX_BUNDLE_GUI_IDENTIFIER "com.spreadsheet.native"
         MACOSX_BUNDLE_BUNDLE_NAME "NativeSpreadsheet"
         MACOSX_BUNDLE_BUNDLE_VERSION "1.0.0"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "1.0"
+        MACOSX_BUNDLE_ICON_FILE AppIcon.icns
     )
 endif()
 

@@ -528,6 +528,34 @@ void Spreadsheet::deleteCellsShiftUp(const CellRange& range) {
     }
 }
 
+// ============== Merge Cells ==============
+
+void Spreadsheet::mergeCells(const CellRange& range) {
+    // Check if any cell in the range is already part of a merged region
+    for (const auto& mr : m_mergedRegions) {
+        if (mr.range.intersects(range)) {
+            return; // Can't merge overlapping regions
+        }
+    }
+    m_mergedRegions.push_back({range});
+}
+
+void Spreadsheet::unmergeCells(const CellRange& range) {
+    m_mergedRegions.erase(
+        std::remove_if(m_mergedRegions.begin(), m_mergedRegions.end(),
+                        [&range](const MergedRegion& mr) { return mr.range.intersects(range); }),
+        m_mergedRegions.end());
+}
+
+const Spreadsheet::MergedRegion* Spreadsheet::getMergedRegionAt(int row, int col) const {
+    for (const auto& mr : m_mergedRegions) {
+        if (mr.range.contains(row, col)) {
+            return &mr;
+        }
+    }
+    return nullptr;
+}
+
 // ============== Data Validation ==============
 
 void Spreadsheet::addValidationRule(const DataValidationRule& rule) {
