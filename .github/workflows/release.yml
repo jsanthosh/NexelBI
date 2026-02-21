@@ -54,7 +54,7 @@ jobs:
           path: Nexel-*.dmg
 
   build-macos-x64:
-    runs-on: macos-13
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
@@ -72,7 +72,8 @@ jobs:
           cd native
           mkdir -p build
           cmake -B build -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_PREFIX_PATH="$Qt6_DIR"
+            -DCMAKE_PREFIX_PATH="$Qt6_DIR" \
+            -DCMAKE_OSX_ARCHITECTURES=x86_64
 
       - name: Build
         run: cmake --build native/build --config Release -j$(sysctl -n hw.ncpu)
@@ -119,8 +120,8 @@ jobs:
       - name: Configure
         run: |
           cd native
-          mkdir -p build
-          cmake -B build -DCMAKE_BUILD_TYPE=Release `
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          cmake -B build -G "Visual Studio 17 2022" -A x64 `
             -DCMAKE_PREFIX_PATH="$env:Qt6_DIR" `
             -DCMAKE_TOOLCHAIN_FILE="$env:CMAKE_TOOLCHAIN_FILE"
 
@@ -132,7 +133,10 @@ jobs:
 
       - name: Deploy Qt DLLs
         run: |
-          windeployqt native/install/bin/NativeSpreadsheet.exe --release --no-translations
+          $exePath = Get-ChildItem -Path native/install -Recurse -Filter "NativeSpreadsheet.exe" | Select-Object -First 1
+          if ($exePath) {
+            windeployqt $exePath.FullName --release --no-translations
+          }
 
       - name: Package
         run: |
@@ -213,19 +217,17 @@ jobs:
 
           # Create icon
           mkdir -p native/AppDir/usr/share/icons/hicolor/256x256/apps
-          # Use a placeholder icon (the app has AppIcon.icns for macOS)
           convert -size 256x256 xc:"#107C10" -gravity center \
             -fill white -font Helvetica-Bold -pointsize 80 \
             -annotate 0 "N" \
             native/AppDir/usr/share/icons/hicolor/256x256/apps/nexel.png 2>/dev/null || \
           python3 -c "
-          from PIL import Image, ImageDraw, ImageFont
+          from PIL import Image, ImageDraw
           img = Image.new('RGB', (256, 256), '#107C10')
           d = ImageDraw.Draw(img)
           d.text((90, 60), 'N', fill='white')
           img.save('native/AppDir/usr/share/icons/hicolor/256x256/apps/nexel.png')
           " 2>/dev/null || \
-          # Fallback: create a simple 1x1 PNG
           printf '\x89PNG\r\n\x1a\n' > native/AppDir/usr/share/icons/hicolor/256x256/apps/nexel.png
 
           export QMAKE=$Qt6_DIR/bin/qmake
@@ -236,7 +238,6 @@ jobs:
             --output appimage \
             --desktop-file native/AppDir/usr/share/applications/nexel.desktop || true
 
-          # Rename output
           mv Nexel-*.AppImage Nexel-${{ github.ref_name }}-Linux-x86_64.AppImage 2>/dev/null || \
           mv *.AppImage Nexel-${{ github.ref_name }}-Linux-x86_64.AppImage 2>/dev/null || true
 
@@ -277,7 +278,7 @@ jobs:
             ### Downloads
             | Platform | File |
             |----------|------|
-            | macOS (Apple Silicon) | `Nexel-${{ github.ref_name }}-macOS-arm64.dmg` |
+            | macOS (Apple Silicon - M1/M2/M3/M4) | `Nexel-${{ github.ref_name }}-macOS-arm64.dmg` |
             | macOS (Intel) | `Nexel-${{ github.ref_name }}-macOS-x64.dmg` |
             | Windows (64-bit) | `Nexel-${{ github.ref_name }}-Windows-x64.zip` |
             | Linux (64-bit) | `Nexel-${{ github.ref_name }}-Linux-x86_64.AppImage` |
