@@ -451,14 +451,21 @@ void ChatPanel::sendToApi(const QString& userMessage) {
         "type (\"line\"/\"column\"/\"winloss\", default \"line\"), color (hex, optional), show_high (bool, optional), show_low (bool, optional)\n"
         "- insert_image: Insert floating image. Fields: path (file path), width (pixels, optional), height (pixels, optional)\n"
         "- run_macro: Execute JavaScript macro. Fields: code (JS string using sheet.getCellValue/setCellValue/setBold etc.)\n"
-        "- record_macro: Start/stop macro recording. Fields: action (\"start\"/\"stop\")\n\n"
+        "- record_macro: Start/stop macro recording. Fields: action (\"start\"/\"stop\")\n"
+        "- conditional_format: Create conditional formatting rule (auto-updates). Fields: range, "
+        "condition (\"greater_than\"/\"less_than\"/\"equal\"/\"not_equal\"/\"greater_than_or_equal\"/\"less_than_or_equal\"/\"between\"/\"contains\"), "
+        "value (number or string), value2 (only for \"between\"), "
+        "bg_color (hex, optional, default \"#FFEB9C\"), fg_color (hex, optional), bold (bool, optional)\n\n"
         "Rules:\n"
         "- Always explain what you're doing in plain text BEFORE the [ACTIONS] block\n"
         "- Use cell references like A1, B2, AA1. Ranges use colon: A1:D10\n"
         "- For formulas, use standard Excel syntax starting with =\n"
         "- When user says \"insert chart for X\" or \"chart for X\", determine the data range from the spreadsheet data that matches column headers containing X\n"
         "- You can combine many actions in one response\n"
-        "- Be concise but friendly\n";
+        "- Be concise but friendly\n"
+        "- IMPORTANT: When user asks to \"highlight cells where...\", \"highlight values above/below...\", "
+        "or any conditional highlighting, ALWAYS use the conditional_format action (NOT run_macro or format). "
+        "The conditional_format action creates a live rule that auto-applies as data changes.\n";
 
     if (!context.isEmpty()) {
         systemPrompt += "\nCurrent spreadsheet state:\n" + context;

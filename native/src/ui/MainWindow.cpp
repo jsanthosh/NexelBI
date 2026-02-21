@@ -122,6 +122,12 @@ MainWindow::MainWindow(QWidget* parent)
         statusBar()->showMessage("Macro: " + msg, 3000);
     });
 
+    // Connect macro engine to model and view for action recording
+    m_spreadsheetView->setMacroEngine(m_macroEngine);
+    if (m_spreadsheetView->getModel()) {
+        m_spreadsheetView->getModel()->setMacroEngine(m_macroEngine);
+    }
+
     createMenuBar();
     createStatusBar();
     connectSignals();
@@ -244,6 +250,9 @@ void MainWindow::switchToSheet(int index) {
     // Update macro engine's spreadsheet reference
     if (m_macroEngine) {
         m_macroEngine->setSpreadsheet(m_sheets[index]);
+        if (m_spreadsheetView->getModel()) {
+            m_spreadsheetView->getModel()->setMacroEngine(m_macroEngine);
+        }
     }
 
     // Reconnect dataChanged for live chart updates on the new model
@@ -592,6 +601,7 @@ void MainWindow::connectSignals() {
     connect(m_toolbar, &Toolbar::unmergeCellsRequested, m_spreadsheetView, &SpreadsheetView::unmergeCells);
     connect(m_toolbar, &Toolbar::increaseIndent, m_spreadsheetView, &SpreadsheetView::increaseIndent);
     connect(m_toolbar, &Toolbar::decreaseIndent, m_spreadsheetView, &SpreadsheetView::decreaseIndent);
+    connect(m_toolbar, &Toolbar::textRotationChanged, m_spreadsheetView, &SpreadsheetView::applyTextRotation);
 
     connect(m_toolbar, &Toolbar::conditionalFormatRequested, this, &MainWindow::onConditionalFormat);
     connect(m_toolbar, &Toolbar::dataValidationRequested, this, &MainWindow::onDataValidation);
@@ -639,6 +649,9 @@ void MainWindow::connectSignals() {
     // When SpreadsheetView inserts a cell reference via click, insert it into formula bar
     connect(m_spreadsheetView, &SpreadsheetView::cellReferenceInserted,
             m_formulaBar, &FormulaBar::insertText);
+    // When SpreadsheetView replaces a reference during range drag, update formula bar
+    connect(m_spreadsheetView, &SpreadsheetView::cellReferenceReplaced,
+            m_formulaBar, &FormulaBar::replaceLastInsertedText);
 
     connect(m_formulaBar, &FormulaBar::contentEdited,
             this, [this](const QString& content) {
@@ -649,6 +662,28 @@ void MainWindow::connectSignals() {
                 model->setData(index, content);
             }
         }
+    });
+
+    // Enter in formula bar: commit the value and move focus back to grid, move down
+    connect(m_formulaBar, &FormulaBar::returnPressed, this, [this]() {
+        auto index = m_spreadsheetView->currentIndex();
+        if (index.isValid()) {
+            auto model = m_spreadsheetView->getModel();
+            if (model) {
+                model->setData(index, m_formulaBar->getContent());
+            }
+        }
+        // Turn off formula edit mode
+        m_spreadsheetView->setFormulaEditMode(false);
+        // Move to next row (like pressing Enter in a cell)
+        int newRow = index.row() + 1;
+        if (newRow < m_spreadsheetView->model()->rowCount()) {
+            QModelIndex next = m_spreadsheetView->model()->index(newRow, index.column());
+            m_spreadsheetView->setCurrentIndex(next);
+            m_spreadsheetView->scrollTo(next);
+        }
+        // Return focus to the grid
+        m_spreadsheetView->setFocus();
     });
 
     // Live chart updates: refresh charts on the active sheet when data changes
@@ -784,6 +819,7 @@ void MainWindow::openFile(const QString& fileName) {
                     int idx = c->property("sheetIndex").toInt();
                     for (auto* other : m_charts) if (other != c && other->property("sheetIndex").toInt() == idx) other->setSelected(false);
                     for (auto* s : m_shapes) if (s->property("sheetIndex").toInt() == idx) s->setSelected(false);
+                    highlightChartDataRange(c);
                 });
 
                 chart->setProperty("sheetIndex", si);
@@ -1217,24 +1253,23 @@ void MainWindow::onConditionalFormat() {
     auto sheet = m_spreadsheetView->getSpreadsheet();
     if (!sheet) return;
 
+    // Use selection as default range for new rules (or A1 if nothing selected)
+    CellRange defaultRange(CellAddress(0, 0), CellAddress(0, 0));
     QModelIndexList selected = m_spreadsheetView->selectionModel()->selectedIndexes();
-    if (selected.isEmpty()) return;
-
-    // Get selection bounding box
-    int minRow = INT_MAX, maxRow = 0, minCol = INT_MAX, maxCol = 0;
-    for (const auto& idx : selected) {
-        minRow = qMin(minRow, idx.row());
-        maxRow = qMax(maxRow, idx.row());
-        minCol = qMin(minCol, idx.column());
-        maxCol = qMax(maxCol, idx.column());
+    if (!selected.isEmpty()) {
+        int minRow = INT_MAX, maxRow = 0, minCol = INT_MAX, maxCol = 0;
+        for (const auto& idx : selected) {
+            minRow = qMin(minRow, idx.row());
+            maxRow = qMax(maxRow, idx.row());
+            minCol = qMin(minCol, idx.column());
+            maxCol = qMax(maxCol, idx.column());
+        }
+        defaultRange = CellRange(CellAddress(minRow, minCol), CellAddress(maxRow, maxCol));
     }
 
-    CellRange range(CellAddress(minRow, minCol), CellAddress(maxRow, maxCol));
-    ConditionalFormatDialog dialog(range, sheet->getConditionalFormatting(), this);
-    if (dialog.exec() == QDialog::Accepted) {
-        m_spreadsheetView->refreshView();
-        statusBar()->showMessage("Conditional formatting applied");
-    }
+    ConditionalFormatDialog dialog(defaultRange, sheet->getConditionalFormatting(), this);
+    dialog.exec();
+    m_spreadsheetView->refreshView();
 }
 
 // ============== Data Validation ==============
@@ -1615,6 +1650,41 @@ void MainWindow::onChatActions(const QJsonArray& actions) {
                 if (macroAction == "start") m_macroEngine->startRecording();
                 else if (macroAction == "stop") m_macroEngine->stopRecording();
             }
+
+        } else if (type == "conditional_format") {
+            CellAddress start = parseRangeStart(action["range"].toString());
+            CellAddress end = parseRangeEnd(action["range"].toString());
+            CellRange range(start, end);
+
+            // Parse condition type
+            QString cond = action["condition"].toString().toLower();
+            ConditionType condType = ConditionType::GreaterThan;
+            if (cond == "equal") condType = ConditionType::Equal;
+            else if (cond == "not_equal") condType = ConditionType::NotEqual;
+            else if (cond == "greater_than") condType = ConditionType::GreaterThan;
+            else if (cond == "less_than") condType = ConditionType::LessThan;
+            else if (cond == "greater_than_or_equal") condType = ConditionType::GreaterThanOrEqual;
+            else if (cond == "less_than_or_equal") condType = ConditionType::LessThanOrEqual;
+            else if (cond == "between") condType = ConditionType::Between;
+            else if (cond == "contains") condType = ConditionType::CellContains;
+
+            auto rule = std::make_shared<ConditionalFormat>(range, condType);
+            rule->setValue1(action["value"].toVariant());
+            if (action.contains("value2")) {
+                rule->setValue2(action["value2"].toVariant());
+            }
+
+            // Build style
+            CellStyle style;
+            style.backgroundColor = action.contains("bg_color")
+                ? action["bg_color"].toString() : "#FFEB9C";
+            if (action.contains("fg_color"))
+                style.foregroundColor = action["fg_color"].toString();
+            if (action.contains("bold"))
+                style.bold = action["bold"].toBool();
+            rule->setStyle(style);
+
+            sheet->getConditionalFormatting().addRule(rule);
         }
     }
 
@@ -1692,6 +1762,7 @@ void MainWindow::onInsertChart() {
             for (auto* s : m_shapes) {
                 if (s->property("sheetIndex").toInt() == si) s->setSelected(false);
             }
+            highlightChartDataRange(c);
         });
 
         chart->setProperty("sheetIndex", m_activeSheetIndex);
@@ -1737,6 +1808,29 @@ void MainWindow::onInsertShape() {
 
         statusBar()->showMessage("Shape inserted");
     }
+}
+
+void MainWindow::highlightChartDataRange(ChartWidget* chart) {
+    if (!chart || !m_spreadsheetView) return;
+
+    auto cfg = chart->config();
+    if (cfg.dataRange.isEmpty()) return;
+
+    CellRange range(cfg.dataRange);
+    int startCol = range.getStart().col;
+    int endCol = range.getEnd().col;
+
+    auto colors = ChartWidget::themeColors(cfg.themeIndex);
+    QColor categoryColor(128, 0, 128); // purple for category/X column
+
+    QVector<QPair<int, QColor>> seriesColumns;
+    // First data column after category column gets series colors
+    for (int c = startCol + 1; c <= endCol; ++c) {
+        QColor sc = colors[(c - startCol - 1) % colors.size()];
+        seriesColumns.append({c, sc});
+    }
+
+    m_spreadsheetView->setChartRangeHighlight(range, seriesColumns, categoryColor);
 }
 
 void MainWindow::onEditChart(ChartWidget* chart) {
@@ -1932,6 +2026,9 @@ void MainWindow::deselectAllOverlays() {
         if (img->property("sheetIndex").toInt() == m_activeSheetIndex)
             img->setSelected(false);
     }
+    // Clear chart data range highlights
+    m_spreadsheetView->clearChartRangeHighlight();
+
     // Hide chart properties panel when nothing is selected
     if (m_chartPropsDock && m_chartPropsDock->isVisible()) {
         m_chartPropsDock->hide();
@@ -2088,6 +2185,7 @@ void MainWindow::insertChartFromChat(const QJsonObject& params) {
         int si = c->property("sheetIndex").toInt();
         for (auto* other : m_charts) if (other != c && other->property("sheetIndex").toInt() == si) other->setSelected(false);
         for (auto* s : m_shapes) if (s->property("sheetIndex").toInt() == si) s->setSelected(false);
+        highlightChartDataRange(c);
     });
 
     chart->setProperty("sheetIndex", m_activeSheetIndex);
@@ -2279,6 +2377,7 @@ void MainWindow::onCreatePivotTable() {
                 int si = c->property("sheetIndex").toInt();
                 for (auto* other : m_charts) if (other != c && other->property("sheetIndex").toInt() == si) other->setSelected(false);
                 for (auto* s : m_shapes) if (s->property("sheetIndex").toInt() == si) s->setSelected(false);
+                highlightChartDataRange(c);
             });
 
             chart->setProperty("sheetIndex", pivotSheetIdx);
@@ -2368,6 +2467,7 @@ void MainWindow::applyTemplate(const TemplateResult& result) {
             int si = c->property("sheetIndex").toInt();
             for (auto* other : m_charts) if (other != c && other->property("sheetIndex").toInt() == si) other->setSelected(false);
             for (auto* s : m_shapes) if (s->property("sheetIndex").toInt() == si) s->setSelected(false);
+            highlightChartDataRange(c);
         });
 
         chart->setProperty("sheetIndex", sheetIdx);

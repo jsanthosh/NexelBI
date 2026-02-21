@@ -774,6 +774,49 @@ QToolBar* Toolbar::createSecondaryToolbar(QWidget* parent) {
     bar->addWidget(indentDecBtn);
     connect(indentDecBtn, &QToolButton::clicked, this, &Toolbar::decreaseIndent);
 
+    // ===== Text Rotation =====
+    QToolButton* rotateBtn = new QToolButton(bar);
+    rotateBtn->setToolTip("Text Rotation");
+    rotateBtn->setPopupMode(QToolButton::InstantPopup);
+    rotateBtn->setFixedSize(38, 24);
+    rotateBtn->setStyleSheet(
+        "QToolButton { background: transparent; border: 1px solid transparent; border-radius: 4px; padding: 2px 4px; }"
+        "QToolButton:hover { background-color: #E8ECF0; border-color: #D0D5DD; }"
+        "QToolButton::menu-indicator { image: none; width: 0; }"
+    );
+    // Create rotation icon: tilted "ab" text
+    rotateBtn->setIcon(createIcon(16, [](QPainter& p, int) {
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.setPen(QPen(QColor("#555"), 1.2));
+        QFont f = p.font();
+        f.setPixelSize(9);
+        f.setBold(true);
+        p.setFont(f);
+        p.translate(8, 8);
+        p.rotate(-45);
+        p.drawText(QRect(-10, -6, 20, 12), Qt::AlignCenter, "ab");
+        p.rotate(45);
+        p.translate(-8, -8);
+    }));
+
+    QMenu* rotateMenu = new QMenu(rotateBtn);
+    rotateMenu->setStyleSheet(
+        "QMenu { background: #FFFFFF; border: 1px solid #D0D5DD; border-radius: 6px; padding: 4px; }"
+        "QMenu::item { padding: 5px 16px 5px 8px; border-radius: 4px; font-size: 12px; }"
+        "QMenu::item:selected { background-color: #E8F0FE; }"
+        "QMenu::separator { height: 1px; background: #E0E3E8; margin: 3px 8px; }"
+    );
+    rotateMenu->addAction("Angle Counterclockwise", this, [this]() { emit textRotationChanged(45); });
+    rotateMenu->addAction("Angle Clockwise", this, [this]() { emit textRotationChanged(-45); });
+    rotateMenu->addSeparator();
+    rotateMenu->addAction("Vertical Text", this, [this]() { emit textRotationChanged(270); });
+    rotateMenu->addAction("Rotate Text Up", this, [this]() { emit textRotationChanged(90); });
+    rotateMenu->addAction("Rotate Text Down", this, [this]() { emit textRotationChanged(-90); });
+    rotateMenu->addSeparator();
+    rotateMenu->addAction("No Rotation", this, [this]() { emit textRotationChanged(0); });
+    rotateBtn->setMenu(rotateMenu);
+    bar->addWidget(rotateBtn);
+
     bar->addSeparator();
 
     // ===== Borders (Excel-style split button) =====

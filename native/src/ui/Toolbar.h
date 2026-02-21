@@ -58,6 +58,8 @@ signals:
     // Indent
     void increaseIndent();
     void decreaseIndent();
+    // Text rotation
+    void textRotationChanged(int degrees);
     // Conditional formatting & validation
     void conditionalFormatRequested();
     void dataValidationRequested();

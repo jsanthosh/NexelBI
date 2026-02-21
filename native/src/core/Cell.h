@@ -61,6 +61,8 @@ struct CellStyle {
     BorderStyle borderRight;
     // Indent
     int indentLevel = 0;
+    // Text rotation (degrees: 0, 45, 90, -45, -90, 270=vertical stack)
+    int textRotation = 0;
 };
 
 class Cell {

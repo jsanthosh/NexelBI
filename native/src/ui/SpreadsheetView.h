@@ -13,6 +13,7 @@
 class Spreadsheet;
 class SpreadsheetModel;
 class CellDelegate;
+class MacroEngine;
 
 class SpreadsheetView : public QTableView {
     Q_OBJECT
@@ -55,6 +56,9 @@ public:
     void increaseIndent();
     void decreaseIndent();
 
+    // Text rotation
+    void applyTextRotation(int degrees);
+
     // Borders
     void applyBorderStyle(const QString& borderType);
 
@@ -88,6 +92,9 @@ public:
     void autofitSelectedColumns();
     void autofitSelectedRows();
 
+    // Macro recording
+    void setMacroEngine(MacroEngine* engine) { m_macroEngine = engine; }
+
     // Formula editing: insert cell reference on click
     void setFormulaEditMode(bool active);
     bool isFormulaEditMode() const { return m_formulaEditMode; }
@@ -110,6 +117,12 @@ public:
     // Gridline visibility
     void setGridlinesVisible(bool visible);
 
+    // Chart data range highlighting
+    void setChartRangeHighlight(const CellRange& range,
+                                const QVector<QPair<int, QColor>>& seriesColumns,
+                                const QColor& categoryColor);
+    void clearChartRangeHighlight();
+
     // UI Operations
     void refreshView();
     void zoomIn();
@@ -120,6 +133,7 @@ signals:
     void cellSelected(int row, int col, const QString& content, const QString& address);
     void formatCellsRequested();
     void cellReferenceInserted(const QString& ref);
+    void cellReferenceReplaced(const QString& newRef);
 
 protected:
     void keyPressEvent(QKeyEvent* event) override;
@@ -129,6 +143,8 @@ protected:
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     void currentChanged(const QModelIndex& current, const QModelIndex& previous) override;
+    void closeEditor(QWidget* editor, QAbstractItemDelegate::EndEditHint hint) override;
+    void commitData(QWidget* editor) override;
 
 private slots:
     void onCellClicked(const QModelIndex& index);
@@ -141,6 +157,7 @@ private:
     std::shared_ptr<Spreadsheet> m_spreadsheet;
     SpreadsheetModel* m_model = nullptr;
     CellDelegate* m_delegate = nullptr;
+    MacroEngine* m_macroEngine = nullptr;
     int m_zoomLevel;
 
     // Format painter state
@@ -178,6 +195,13 @@ private:
     bool m_formulaEditMode = false;
     QModelIndex m_formulaEditCell;  // The cell being edited with the formula
 
+    // Formula range drag state
+    bool m_formulaRangeDragging = false;
+    QModelIndex m_formulaRangeStart;
+    QModelIndex m_formulaRangeEnd;
+    int m_formulaRefInsertPos = -1;
+    int m_formulaRefInsertLen = 0;
+
     void initializeView();
     void setupConnections();
     void emitCellSelected(const QModelIndex& index);
@@ -209,6 +233,15 @@ private:
     void setupFreezeViews();
     void destroyFreezeViews();
     void updateFreezeGeometry();
+
+    // Chart data range highlight state
+    struct ChartRangeHighlight {
+        CellRange fullRange;
+        QVector<QPair<int, QColor>> seriesColumns; // col index → series color
+        QColor categoryColor;
+    };
+    ChartRangeHighlight m_chartHighlight;
+    bool m_chartHighlightActive = false;
 };
 
 #endif // SPREADSHEETVIEW_H

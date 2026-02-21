@@ -5,6 +5,7 @@
 #include "../core/TableStyle.h"
 #include "../core/ConditionalFormatting.h"
 #include "../core/SparklineConfig.h"
+#include "../core/MacroEngine.h"
 #include <QFont>
 #include <QMessageBox>
 #include <QApplication>
@@ -86,6 +87,10 @@ QVariant SpreadsheetModel::data(const QModelIndex& index, int role) const {
             return value;
         }
         case Qt::EditRole: {
+            // When editing, show the formula (like Excel) instead of the computed value
+            if (cell->getType() == CellType::Formula) {
+                return cell->getFormula();
+            }
             return m_spreadsheet->getCellValue(CellAddress(index.row(), index.column()));
         }
         case Qt::FontRole: {
@@ -204,6 +209,9 @@ QVariant SpreadsheetModel::data(const QModelIndex& index, int role) const {
             if (b.enabled) return QString("%1,%2").arg(b.width).arg(b.color);
             return QVariant();
         }
+        case Qt::UserRole + 16: { // Text rotation
+            return cell->getStyle().textRotation;
+        }
         case SparklineRole: { // Sparkline render data
             auto* sparkline = m_spreadsheet->getSparkline(CellAddress(index.row(), index.column()));
             if (!sparkline) return QVariant();
@@ -272,6 +280,19 @@ bool SpreadsheetModel::setData(const QModelIndex& index, const QVariant& value, 
     CellAddress addr(index.row(), index.column());
     QString strValue = value.toString();
 
+    // Auto-complete unmatched parentheses in formulas (like Excel)
+    if (strValue.startsWith("=")) {
+        int open = 0;
+        for (QChar ch : strValue) {
+            if (ch == '(') ++open;
+            else if (ch == ')') --open;
+        }
+        while (open > 0) {
+            strValue.append(')');
+            --open;
+        }
+    }
+
     // Data validation check (skip for formulas)
     if (!strValue.startsWith("=") && !m_suppressUndo) {
         if (!m_spreadsheet->validateCell(index.row(), index.column(), strValue)) {
@@ -323,6 +344,31 @@ bool SpreadsheetModel::setData(const QModelIndex& index, const QVariant& value, 
             m_spreadsheet->setCellFormula(addr, strValue);
         } else {
             m_spreadsheet->setCellValue(addr, value);
+        }
+    }
+
+    // Record action for macro recording
+    if (m_macroEngine && m_macroEngine->isRecording()) {
+        QString cellRef = addr.toString();
+        if (strValue.startsWith("=")) {
+            m_macroEngine->recordAction(
+                QString("sheet.setCellFormula(\"%1\", \"%2\");")
+                    .arg(cellRef, strValue));
+        } else {
+            // Try to preserve numeric types
+            bool isNum = false;
+            double numVal = strValue.toDouble(&isNum);
+            if (isNum) {
+                m_macroEngine->recordAction(
+                    QString("sheet.setCellValue(\"%1\", %2);")
+                        .arg(cellRef).arg(numVal));
+            } else {
+                QString escaped = strValue;
+                escaped.replace("\\", "\\\\").replace("\"", "\\\"");
+                m_macroEngine->recordAction(
+                    QString("sheet.setCellValue(\"%1\", \"%2\");")
+                        .arg(cellRef, escaped));
+            }
         }
     }
 

@@ -22,6 +22,7 @@ FormulaBar::FormulaBar(QWidget* parent)
     // Setup connections
     connect(m_formulaEdit, &QLineEdit::textChanged, this, &FormulaBar::onTextChanged);
     connect(m_formulaEdit, &QLineEdit::textEdited, this, &FormulaBar::onTextEdited);
+    connect(m_formulaEdit, &QLineEdit::returnPressed, this, &FormulaBar::returnPressed);
 
     setStyleSheet(
         "QWidget {"
@@ -64,5 +65,15 @@ bool FormulaBar::isFormulaEditing() const {
 }
 
 void FormulaBar::insertText(const QString& text) {
+    m_lastInsertPos = m_formulaEdit->cursorPosition();
     m_formulaEdit->insert(text);
+    m_lastInsertLen = text.length();
+}
+
+void FormulaBar::replaceLastInsertedText(const QString& newText) {
+    if (m_lastInsertPos >= 0) {
+        m_formulaEdit->setSelection(m_lastInsertPos, m_lastInsertLen);
+        m_formulaEdit->insert(newText);
+        m_lastInsertLen = newText.length();
+    }
 }

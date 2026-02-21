@@ -35,11 +35,19 @@ CellDelegate::CellDelegate(QObject* parent)
 }
 
 bool CellDelegate::eventFilter(QObject* object, QEvent* event) {
+    // During formula edit mode, block FocusOut from closing the editor
+    // (user is clicking on the grid to select cell references)
+    if (m_formulaEditMode && event->type() == QEvent::FocusOut) {
+        return true;  // consume the event, keep editor open
+    }
+
     if (event->type() == QEvent::KeyPress) {
         QKeyEvent* keyEvent = static_cast<QKeyEvent*>(event);
         // Arrow keys during editing: commit and move (like Excel)
-        if (keyEvent->key() == Qt::Key_Up || keyEvent->key() == Qt::Key_Down ||
-            keyEvent->key() == Qt::Key_Left || keyEvent->key() == Qt::Key_Right) {
+        // But NOT during formula edit mode — arrows navigate in the formula text
+        if (!m_formulaEditMode &&
+            (keyEvent->key() == Qt::Key_Up || keyEvent->key() == Qt::Key_Down ||
+             keyEvent->key() == Qt::Key_Left || keyEvent->key() == Qt::Key_Right)) {
             QLineEdit* editor = qobject_cast<QLineEdit*>(object);
             if (editor) {
                 // Left/Right: only commit if cursor is at boundary
@@ -150,8 +158,11 @@ void CellDelegate::setEditorData(QWidget* editor, const QModelIndex& index) cons
     if (lineEdit) {
         lineEdit->setText(index.data(Qt::EditRole).toString());
         // Place cursor at end (not selecting all text) — like Excel
-        lineEdit->deselect();
-        lineEdit->setCursorPosition(lineEdit->text().length());
+        // Deferred to after Qt finishes initializing the editor, which otherwise re-selects all text
+        QTimer::singleShot(0, lineEdit, [lineEdit]() {
+            lineEdit->deselect();
+            lineEdit->setCursorPosition(lineEdit->text().length());
+        });
     }
 }
 
@@ -227,8 +238,45 @@ void CellDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option,
             indentPx = indentData.toInt() * 12; // 12px per indent level
         }
 
+        // Text rotation support
+        int rotation = 0;
+        QVariant rotData = index.data(Qt::UserRole + 16);
+        if (rotData.isValid()) {
+            rotation = rotData.toInt();
+        }
+
         QRect textRect = rect.adjusted(4 + indentPx, 1, -4, -1);
-        painter->drawText(textRect, alignment, text);
+
+        if (rotation == 0) {
+            painter->drawText(textRect, alignment, text);
+        } else if (rotation == 270) {
+            // Vertical stacked text: draw each character on its own line
+            QFontMetrics fm(font);
+            int charH = fm.height();
+            int maxCharW = 0;
+            for (const QChar& ch : text) {
+                maxCharW = qMax(maxCharW, fm.horizontalAdvance(ch));
+            }
+            int totalH = charH * text.length();
+            int startY = textRect.top() + qMax(0, (textRect.height() - totalH) / 2);
+            int centerX = textRect.left() + (textRect.width() - maxCharW) / 2;
+            for (int i = 0; i < text.length(); ++i) {
+                QRect charRect(centerX, startY + i * charH, maxCharW, charH);
+                painter->drawText(charRect, Qt::AlignCenter, QString(text[i]));
+            }
+        } else {
+            // Angled text: rotate painter
+            painter->save();
+            QFontMetrics fm(font);
+            int textW = fm.horizontalAdvance(text);
+            int textH = fm.height();
+            QPointF center = textRect.center();
+            painter->translate(center);
+            painter->rotate(-rotation); // Qt rotates clockwise, we want CCW for positive angles
+            QRectF rotRect(-textW / 2.0, -textH / 2.0, textW, textH);
+            painter->drawText(rotRect, Qt::AlignCenter, text);
+            painter->restore();
+        }
     }
 
     // --- Sparkline rendering ---

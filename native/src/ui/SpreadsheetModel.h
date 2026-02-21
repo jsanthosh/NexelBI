@@ -5,6 +5,7 @@
 #include <memory>
 
 class Spreadsheet;
+class MacroEngine;
 
 class SpreadsheetModel : public QAbstractTableModel {
     Q_OBJECT
@@ -14,6 +15,8 @@ public:
 
     SpreadsheetModel(std::shared_ptr<Spreadsheet> spreadsheet, QObject* parent = nullptr);
     ~SpreadsheetModel() = default;
+
+    void setMacroEngine(MacroEngine* engine) { m_macroEngine = engine; }
 
     int rowCount(const QModelIndex& parent = QModelIndex()) const override;
     int columnCount(const QModelIndex& parent = QModelIndex()) const override;
@@ -36,6 +39,7 @@ public:
 
 private:
     std::shared_ptr<Spreadsheet> m_spreadsheet;
+    MacroEngine* m_macroEngine = nullptr;
     bool m_suppressUndo = false;
     bool m_highlightInvalid = false;
 

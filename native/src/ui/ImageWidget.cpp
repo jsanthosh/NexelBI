@@ -2,6 +2,7 @@
 
 #include <QPainter>
 #include <QMouseEvent>
+#include <QKeyEvent>
 #include <QContextMenuEvent>
 #include <QMenu>
 #include <QBuffer>
@@ -17,6 +18,7 @@ ImageWidget::ImageWidget(QWidget* parent)
     setMinimumSize(50, 50);
     resize(200, 200);
     setMouseTracking(true);
+    setFocusPolicy(Qt::ClickFocus);
 }
 
 // ---------------------------------------------------------------------------
@@ -315,4 +317,13 @@ void ImageWidget::contextMenuEvent(QContextMenuEvent* event)
     });
 
     menu.exec(event->globalPos());
+}
+
+void ImageWidget::keyPressEvent(QKeyEvent* event) {
+    if (m_selected && (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace)) {
+        emit deleteRequested(this);
+        event->accept();
+        return;
+    }
+    QWidget::keyPressEvent(event);
 }

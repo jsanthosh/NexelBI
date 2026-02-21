@@ -28,11 +28,14 @@ public:
     void setShowGridlines(bool show) { m_showGridlines = show; }
     bool showGridlines() const { return m_showGridlines; }
 
+    void setFormulaEditMode(bool active) { m_formulaEditMode = active; }
+
 signals:
     void formulaEditModeChanged(bool active) const;
 
 private:
     bool m_showGridlines = true;
+    bool m_formulaEditMode = false;
     void drawSparkline(QPainter* painter, const QRect& rect, const SparklineRenderData& data) const;
 };
 

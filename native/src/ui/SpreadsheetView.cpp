@@ -3,6 +3,7 @@
 #include "CellDelegate.h"
 #include "../core/Spreadsheet.h"
 #include "../core/UndoManager.h"
+#include "../core/MacroEngine.h"
 #include "../core/FillSeries.h"
 #include "../core/TableStyle.h"
 #include "../services/DocumentService.h"
@@ -450,11 +451,32 @@ void SpreadsheetView::applyStyleChange(std::function<void(CellStyle&)> modifier,
     }
 }
 
+// Helper: get the selection bounding range string for macro recording (e.g. "A1:D10")
+static QString selectionRangeStr(QItemSelectionModel* sel) {
+    QModelIndexList selected = sel->selectedIndexes();
+    if (selected.isEmpty()) return {};
+    int minRow = INT_MAX, maxRow = 0, minCol = INT_MAX, maxCol = 0;
+    for (const auto& idx : selected) {
+        minRow = qMin(minRow, idx.row());
+        maxRow = qMax(maxRow, idx.row());
+        minCol = qMin(minCol, idx.column());
+        maxCol = qMax(maxCol, idx.column());
+    }
+    CellRange range(CellAddress(minRow, minCol), CellAddress(maxRow, maxCol));
+    return range.toString();
+}
+
 void SpreadsheetView::applyBold() {
+    if (m_macroEngine && m_macroEngine->isRecording()) {
+        m_macroEngine->recordAction(QString("sheet.setBold(\"%1\", true);").arg(selectionRangeStr(selectionModel())));
+    }
     applyStyleChange([](CellStyle& s) { s.bold = !s.bold; }, {Qt::FontRole});
 }
 
 void SpreadsheetView::applyItalic() {
+    if (m_macroEngine && m_macroEngine->isRecording()) {
+        m_macroEngine->recordAction(QString("sheet.setItalic(\"%1\", true);").arg(selectionRangeStr(selectionModel())));
+    }
     applyStyleChange([](CellStyle& s) { s.italic = !s.italic; }, {Qt::FontRole});
 }
 
@@ -471,14 +493,23 @@ void SpreadsheetView::applyFontFamily(const QString& family) {
 }
 
 void SpreadsheetView::applyFontSize(int size) {
+    if (m_macroEngine && m_macroEngine->isRecording()) {
+        m_macroEngine->recordAction(QString("sheet.setFontSize(\"%1\", %2);").arg(selectionRangeStr(selectionModel())).arg(size));
+    }
     applyStyleChange([size](CellStyle& s) { s.fontSize = size; }, {Qt::FontRole});
 }
 
 void SpreadsheetView::applyForegroundColor(const QColor& color) {
+    if (m_macroEngine && m_macroEngine->isRecording()) {
+        m_macroEngine->recordAction(QString("sheet.setForegroundColor(\"%1\", \"%2\");").arg(selectionRangeStr(selectionModel()), color.name()));
+    }
     applyStyleChange([&color](CellStyle& s) { s.foregroundColor = color.name(); }, {Qt::ForegroundRole});
 }
 
 void SpreadsheetView::applyBackgroundColor(const QColor& color) {
+    if (m_macroEngine && m_macroEngine->isRecording()) {
+        m_macroEngine->recordAction(QString("sheet.setBackgroundColor(\"%1\", \"%2\");").arg(selectionRangeStr(selectionModel()), color.name()));
+    }
     applyStyleChange([&color](CellStyle& s) { s.backgroundColor = color.name(); }, {Qt::BackgroundRole});
 }
 
@@ -937,6 +968,12 @@ void SpreadsheetView::decreaseIndent() {
     applyStyleChange([](CellStyle& s) {
         s.indentLevel = qMax(s.indentLevel - 1, 0);
     }, {Qt::UserRole + 10});
+}
+
+void SpreadsheetView::applyTextRotation(int degrees) {
+    applyStyleChange([degrees](CellStyle& s) {
+        s.textRotation = degrees;
+    }, {Qt::UserRole + 16});
 }
 
 // ============== Borders ==============
@@ -1641,9 +1678,10 @@ void SpreadsheetView::keyPressEvent(QKeyEvent* event) {
 
     // Enter/Return: commit and move down
     if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
-        m_formulaEditMode = false;
+        m_formulaEditMode = false;  // Must be set before commit/close so overrides allow it
         if (state() == QAbstractItemView::EditingState) {
             QWidget* editor = indexWidget(currentIndex());
+            if (!editor) editor = viewport()->findChild<QLineEdit*>();
             if (editor) {
                 commitData(editor);
                 closeEditor(editor, QAbstractItemDelegate::NoHint);
@@ -1663,8 +1701,10 @@ void SpreadsheetView::keyPressEvent(QKeyEvent* event) {
 
     // Tab: commit and move right; Shift+Tab: move left
     if (event->key() == Qt::Key_Tab || event->key() == Qt::Key_Backtab) {
+        m_formulaEditMode = false;
         if (state() == QAbstractItemView::EditingState) {
             QWidget* editor = indexWidget(currentIndex());
+            if (!editor) editor = viewport()->findChild<QLineEdit*>();
             if (editor) {
                 commitData(editor);
                 closeEditor(editor, QAbstractItemDelegate::NoHint);
@@ -1948,16 +1988,52 @@ void SpreadsheetView::keyPressEvent(QKeyEvent* event) {
 
 void SpreadsheetView::setFormulaEditMode(bool active) {
     m_formulaEditMode = active;
+    if (m_delegate) {
+        m_delegate->setFormulaEditMode(active);
+    }
     if (active) {
         m_formulaEditCell = currentIndex();
+    } else {
+        m_formulaRangeDragging = false;
     }
+}
+
+void SpreadsheetView::closeEditor(QWidget* editor, QAbstractItemDelegate::EndEditHint hint) {
+    // During formula edit mode, block editor closing (e.g. from FocusOut
+    // when user clicks on grid to select a cell reference)
+    if (m_formulaEditMode) {
+        return;
+    }
+    QTableView::closeEditor(editor, hint);
+}
+
+void SpreadsheetView::commitData(QWidget* editor) {
+    // During formula edit mode, block data commit (user is still building the formula)
+    if (m_formulaEditMode) {
+        return;
+    }
+    QTableView::commitData(editor);
+}
+
+void SpreadsheetView::setChartRangeHighlight(const CellRange& range,
+                                              const QVector<QPair<int, QColor>>& seriesColumns,
+                                              const QColor& categoryColor) {
+    m_chartHighlight.fullRange = range;
+    m_chartHighlight.seriesColumns = seriesColumns;
+    m_chartHighlight.categoryColor = categoryColor;
+    m_chartHighlightActive = true;
+    viewport()->update();
+}
+
+void SpreadsheetView::clearChartRangeHighlight() {
+    m_chartHighlightActive = false;
+    viewport()->update();
 }
 
 void SpreadsheetView::insertCellReference(const QString& ref) {
     // Insert into the active cell editor if editing inline
     if (state() == QAbstractItemView::EditingState) {
-        QWidget* editor = indexWidget(currentIndex());
-        QLineEdit* lineEdit = qobject_cast<QLineEdit*>(editor);
+        QLineEdit* lineEdit = viewport()->findChild<QLineEdit*>();
         if (lineEdit) {
             lineEdit->insert(ref);
             return;
@@ -1992,12 +2068,45 @@ void SpreadsheetView::mousePressEvent(QMouseEvent* event) {
         }
     }
 
-    // Formula edit mode: clicking a cell inserts its reference
+    // Formula edit mode: clicking a cell inserts its reference, drag selects range
+    // The editor stays open — user is still building the formula (like Excel)
     if (m_formulaEditMode && event->button() == Qt::LeftButton) {
         QModelIndex clickedIdx = indexAt(event->pos());
         if (clickedIdx.isValid() && clickedIdx != m_formulaEditCell) {
             CellAddress addr(clickedIdx.row(), clickedIdx.column());
-            insertCellReference(addr.toString());
+            QString ref = addr.toString();
+
+            // Try to insert into the in-cell editor (delegate editors aren't
+            // accessible via indexWidget, so search viewport children)
+            bool insertedInCell = false;
+            if (state() == QAbstractItemView::EditingState) {
+                QLineEdit* lineEdit = viewport()->findChild<QLineEdit*>();
+                if (lineEdit) {
+                    m_formulaRefInsertPos = lineEdit->cursorPosition();
+                    lineEdit->insert(ref);
+                    m_formulaRefInsertLen = ref.length();
+                    insertedInCell = true;
+                    // Keep focus on the editor so the formula stays active
+                    lineEdit->setFocus();
+                }
+            }
+
+            // Otherwise insert into formula bar
+            if (!insertedInCell) {
+                m_formulaRefInsertPos = -1;
+                m_formulaRefInsertLen = ref.length();
+                emit cellReferenceInserted(ref);
+            }
+
+            m_formulaRangeDragging = true;
+            m_formulaRangeStart = clickedIdx;
+            m_formulaRangeEnd = clickedIdx;
+            event->accept();
+            return;
+        }
+        // Clicking on the formula cell itself — let it through to position cursor
+        // but don't close the editor
+        if (clickedIdx == m_formulaEditCell) {
             event->accept();
             return;
         }
@@ -2040,6 +2149,44 @@ void SpreadsheetView::mousePressEvent(QMouseEvent* event) {
 }
 
 void SpreadsheetView::mouseMoveEvent(QMouseEvent* event) {
+    // Formula range drag: extend selection as user drags
+    if (m_formulaRangeDragging && m_formulaEditMode) {
+        QModelIndex hoverIdx = indexAt(event->pos());
+        if (hoverIdx.isValid() && hoverIdx != m_formulaRangeEnd) {
+            m_formulaRangeEnd = hoverIdx;
+
+            // Build range string
+            CellAddress startAddr(m_formulaRangeStart.row(), m_formulaRangeStart.column());
+            CellAddress endAddr(m_formulaRangeEnd.row(), m_formulaRangeEnd.column());
+            QString newRef;
+            if (m_formulaRangeStart == m_formulaRangeEnd) {
+                newRef = startAddr.toString();
+            } else {
+                newRef = startAddr.toString() + ":" + endAddr.toString();
+            }
+
+            // Replace previously inserted reference
+            bool replacedInCell = false;
+            if (state() == QAbstractItemView::EditingState && m_formulaRefInsertPos >= 0) {
+                QLineEdit* lineEdit = viewport()->findChild<QLineEdit*>();
+                if (lineEdit) {
+                    lineEdit->setSelection(m_formulaRefInsertPos, m_formulaRefInsertLen);
+                    lineEdit->insert(newRef);
+                    m_formulaRefInsertLen = newRef.length();
+                    lineEdit->setFocus();
+                    replacedInCell = true;
+                }
+            }
+            if (!replacedInCell) {
+                emit cellReferenceReplaced(newRef);
+                m_formulaRefInsertLen = newRef.length();
+            }
+            viewport()->update();
+        }
+        event->accept();
+        return;
+    }
+
     if (m_fillDragging) {
         m_fillDragCurrent = event->pos();
         viewport()->update();
@@ -2057,6 +2204,12 @@ void SpreadsheetView::mouseMoveEvent(QMouseEvent* event) {
 }
 
 void SpreadsheetView::mouseReleaseEvent(QMouseEvent* event) {
+    if (m_formulaRangeDragging) {
+        m_formulaRangeDragging = false;
+        viewport()->update();
+        return;
+    }
+
     if (m_fillDragging) {
         m_fillDragging = false;
         performFillSeries();
@@ -2123,6 +2276,78 @@ void SpreadsheetView::paintEvent(QPaintEvent* event) {
             QPolygonF arrow;
             arrow << QPointF(ax - 3, ay - 1) << QPointF(ax + 3, ay - 1) << QPointF(ax, ay + 2.5);
             filterPainter.drawPolygon(arrow);
+        }
+    }
+
+    // Draw chart data range highlights when a chart is selected
+    if (m_chartHighlightActive && m_model) {
+        QPainter chartPainter(viewport());
+        chartPainter.setRenderHint(QPainter::Antialiasing, false);
+
+        int startRow = m_chartHighlight.fullRange.getStart().row;
+        int endRow = m_chartHighlight.fullRange.getEnd().row;
+        int startCol = m_chartHighlight.fullRange.getStart().col;
+        int endCol = m_chartHighlight.fullRange.getEnd().col;
+
+        // Draw each column with its color
+        for (int col = startCol; col <= endCol; ++col) {
+            QColor color = m_chartHighlight.categoryColor; // default for category col
+            for (const auto& sc : m_chartHighlight.seriesColumns) {
+                if (sc.first == col) {
+                    color = sc.second;
+                    break;
+                }
+            }
+
+            // Compute bounding rect for the column's cells in this range
+            QRect colBounds;
+            for (int row = startRow; row <= endRow; ++row) {
+                QModelIndex idx = m_model->index(row, col);
+                QRect cellRect = visualRect(idx);
+                if (cellRect.isNull() || !viewport()->rect().intersects(cellRect)) continue;
+
+                // Fill individual cells with semi-transparent color
+                QColor fillColor(color.red(), color.green(), color.blue(), 35);
+                chartPainter.fillRect(cellRect, fillColor);
+
+                if (colBounds.isNull()) colBounds = cellRect;
+                else colBounds = colBounds.united(cellRect);
+            }
+
+            // Draw outer border around the column range
+            if (!colBounds.isNull()) {
+                chartPainter.setPen(QPen(color, 2));
+                chartPainter.setBrush(Qt::NoBrush);
+                chartPainter.drawRect(colBounds.adjusted(0, 0, -1, -1));
+            }
+        }
+    }
+
+    // Draw formula range selection preview (blue highlight during drag)
+    if (m_formulaRangeDragging && m_formulaEditMode && m_formulaRangeStart.isValid() && m_model) {
+        int r1 = qMin(m_formulaRangeStart.row(), m_formulaRangeEnd.row());
+        int r2 = qMax(m_formulaRangeStart.row(), m_formulaRangeEnd.row());
+        int c1 = qMin(m_formulaRangeStart.column(), m_formulaRangeEnd.column());
+        int c2 = qMax(m_formulaRangeStart.column(), m_formulaRangeEnd.column());
+
+        QRect rangeBounds;
+        QPainter fPainter(viewport());
+        fPainter.setRenderHint(QPainter::Antialiasing, false);
+        QColor rangeColor(68, 114, 196); // Excel-like blue
+
+        for (int row = r1; row <= r2; ++row) {
+            for (int col = c1; col <= c2; ++col) {
+                QRect cellRect = visualRect(m_model->index(row, col));
+                if (cellRect.isNull()) continue;
+                fPainter.fillRect(cellRect, QColor(rangeColor.red(), rangeColor.green(), rangeColor.blue(), 40));
+                if (rangeBounds.isNull()) rangeBounds = cellRect;
+                else rangeBounds = rangeBounds.united(cellRect);
+            }
+        }
+        if (!rangeBounds.isNull()) {
+            fPainter.setPen(QPen(rangeColor, 2));
+            fPainter.setBrush(Qt::NoBrush);
+            fPainter.drawRect(rangeBounds.adjusted(0, 0, -1, -1));
         }
     }
 

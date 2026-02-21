@@ -2,6 +2,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QMouseEvent>
+#include <QKeyEvent>
 #include <QMenu>
 #include <QInputDialog>
 #include <QtMath>
@@ -13,6 +14,7 @@ ShapeWidget::ShapeWidget(QWidget* parent)
     resize(150, 100);
     setAttribute(Qt::WA_DeleteOnClose, false);
     setMouseTracking(true);
+    setFocusPolicy(Qt::ClickFocus);
 }
 
 void ShapeWidget::setConfig(const ShapeConfig& config) {
@@ -313,4 +315,13 @@ void ShapeWidget::contextMenuEvent(QContextMenuEvent* event) {
     menu.addAction("Delete Shape", this, [this]() { emit deleteRequested(this); });
 
     menu.exec(event->globalPos());
+}
+
+void ShapeWidget::keyPressEvent(QKeyEvent* event) {
+    if (m_selected && (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace)) {
+        emit deleteRequested(this);
+        event->accept();
+        return;
+    }
+    QWidget::keyPressEvent(event);
 }

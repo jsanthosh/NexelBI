@@ -3,6 +3,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QMouseEvent>
+#include <QKeyEvent>
 #include <QMenu>
 #include <QtMath>
 #include <algorithm>
@@ -30,6 +31,7 @@ ChartWidget::ChartWidget(QWidget* parent)
     resize(400, 300);
     setAttribute(Qt::WA_DeleteOnClose, false);
     setMouseTracking(true);
+    setFocusPolicy(Qt::ClickFocus);
 
     // Entry animation
     m_entryAnim = new QVariantAnimation(this);
@@ -63,7 +65,11 @@ void ChartWidget::setSelected(bool selected) {
 }
 
 QVector<QColor> ChartWidget::getThemeColors() const {
-    int idx = qBound(0, m_config.themeIndex, static_cast<int>(kThemePalettes.size()) - 1);
+    return themeColors(m_config.themeIndex);
+}
+
+QVector<QColor> ChartWidget::themeColors(int themeIndex) {
+    int idx = qBound(0, themeIndex, static_cast<int>(kThemePalettes.size()) - 1);
     return kThemePalettes[idx];
 }
 
@@ -943,4 +949,13 @@ void ChartWidget::contextMenuEvent(QContextMenuEvent* event) {
     menu.addAction("Delete Chart", this, [this]() { emit deleteRequested(this); });
 
     menu.exec(event->globalPos());
+}
+
+void ChartWidget::keyPressEvent(QKeyEvent* event) {
+    if (m_selected && (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace)) {
+        emit deleteRequested(this);
+        event->accept();
+        return;
+    }
+    QWidget::keyPressEvent(event);
 }

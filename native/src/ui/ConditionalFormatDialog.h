@@ -16,12 +16,13 @@ class ConditionalFormatDialog : public QDialog {
     Q_OBJECT
 
 public:
-    explicit ConditionalFormatDialog(const CellRange& range,
+    explicit ConditionalFormatDialog(const CellRange& defaultRange,
                                      ConditionalFormatting& formatting,
                                      QWidget* parent = nullptr);
 
 private slots:
     void onAddRule();
+    void onUpdateRule();
     void onDeleteRule();
     void onRuleSelected(int row);
     void onConditionTypeChanged(int index);
@@ -32,10 +33,11 @@ private:
     std::shared_ptr<ConditionalFormat> buildRuleFromUI();
     void updateValueFieldsVisibility();
 
-    CellRange m_range;
+    CellRange m_defaultRange;  // default range for new rules (from current selection)
     ConditionalFormatting& m_formatting;
 
     QListWidget* m_ruleList;
+    QLineEdit* m_rangeEdit;    // editable range for new rules
     QComboBox* m_conditionType;
     QLineEdit* m_value1Edit;
     QLineEdit* m_value2Edit;
@@ -43,6 +45,9 @@ private:
     QLabel* m_value2Label;
     QLineEdit* m_formulaEdit;
     QLabel* m_formulaLabel;
+
+    // Action buttons
+    QPushButton* m_updateBtn;
 
     // Style preview
     QPushButton* m_bgColorBtn;

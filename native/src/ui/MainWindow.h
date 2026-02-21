@@ -153,6 +153,7 @@ private:
     void reconnectDataChanged();
     void refreshActiveCharts();
     void applyTemplate(const TemplateResult& result);
+    void highlightChartDataRange(ChartWidget* chart);
 
     // Macro engine
     MacroEngine* m_macroEngine = nullptr;

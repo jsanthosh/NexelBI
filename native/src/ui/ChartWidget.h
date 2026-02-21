@@ -63,6 +63,9 @@ public:
     // Auto-generate chart titles from data range headers (only fills empty fields)
     static void autoGenerateTitles(ChartConfig& config, std::shared_ptr<Spreadsheet> sheet);
 
+    // Get theme colors for a given theme index
+    static QVector<QColor> themeColors(int themeIndex);
+
     // Selection state
     bool isSelected() const { return m_selected; }
     void setSelected(bool selected);
@@ -82,6 +85,7 @@ protected:
     void mouseReleaseEvent(QMouseEvent* event) override;
     void mouseDoubleClickEvent(QMouseEvent* event) override;
     void contextMenuEvent(QContextMenuEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
 
 private:
     // Rendering methods
