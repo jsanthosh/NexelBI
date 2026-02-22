@@ -188,7 +188,7 @@ if(APPLE)
         MACOSX_BUNDLE_BUNDLE_VERSION "2.0.0"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "2.0"
         MACOSX_BUNDLE_ICON_FILE AppIcon.icns
-        INSTALL_RPATH "@executable_path/../Frameworks"
+        INSTALL_RPATH "@executable_path/../Frameworks;/opt/homebrew/lib;/opt/homebrew/opt/qtbase/lib;/opt/homebrew/opt/qtdeclarative/lib"
         BUILD_RPATH_USE_ORIGIN ON
     )
 endif()

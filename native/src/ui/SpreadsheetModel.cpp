@@ -71,30 +71,36 @@ QVariant SpreadsheetModel::data(const QModelIndex& index, int role) const {
         }
     }
 
+    // Shared state: get cell style once, get cell value once (avoid repeated hash lookups)
+    const auto& baseStyle = cell->getStyle();
+    const bool hasCustomStyle = cell->hasCustomStyle();
+
     switch (role) {
         case Qt::DisplayRole: {
             auto value = m_spreadsheet->getCellValue(CellAddress(index.row(), index.column()));
-            const auto& style = cell->getStyle();
-            if (style.numberFormat != "General" && !value.toString().isEmpty()) {
+            if (baseStyle.numberFormat != "General" && !value.toString().isEmpty()) {
                 NumberFormatOptions opts;
-                opts.type = NumberFormat::typeFromString(style.numberFormat);
-                opts.decimalPlaces = style.decimalPlaces;
-                opts.useThousandsSeparator = style.useThousandsSeparator;
-                opts.currencyCode = style.currencyCode;
-                opts.dateFormatId = style.dateFormatId;
+                opts.type = NumberFormat::typeFromString(baseStyle.numberFormat);
+                opts.decimalPlaces = baseStyle.decimalPlaces;
+                opts.useThousandsSeparator = baseStyle.useThousandsSeparator;
+                opts.currencyCode = baseStyle.currencyCode;
+                opts.dateFormatId = baseStyle.dateFormatId;
                 return NumberFormat::format(value.toString(), opts);
             }
             return value;
         }
         case Qt::EditRole: {
-            // When editing, show the formula (like Excel) instead of the computed value
             if (cell->getType() == CellType::Formula) {
                 return cell->getFormula();
             }
             return m_spreadsheet->getCellValue(CellAddress(index.row(), index.column()));
         }
         case Qt::FontRole: {
-            const auto& baseStyle = cell->getStyle();
+            // Fast path: cells with default style (vast majority) — return cached default font
+            if (!hasCustomStyle && m_spreadsheet->getConditionalFormatting().getAllRules().empty()) {
+                static const QFont s_defaultFont("Arial", 11);
+                return s_defaultFont;
+            }
             CellAddress addr(index.row(), index.column());
             auto cellValue = m_spreadsheet->getCellValue(addr);
             CellStyle style = m_spreadsheet->getConditionalFormatting().getEffectiveStyle(addr, cellValue, baseStyle);
@@ -113,11 +119,13 @@ QVariant SpreadsheetModel::data(const QModelIndex& index, int role) const {
             return font;
         }
         case Qt::ForegroundRole: {
-            const auto& baseStyle = cell->getStyle();
+            // Fast path: default style = black text
+            if (!hasCustomStyle && m_spreadsheet->getConditionalFormatting().getAllRules().empty()) {
+                return QVariant(); // Default foreground (black)
+            }
             CellAddress addr(index.row(), index.column());
             auto cellValue = m_spreadsheet->getCellValue(addr);
             CellStyle style = m_spreadsheet->getConditionalFormatting().getEffectiveStyle(addr, cellValue, baseStyle);
-            // Table header row: use header foreground
             auto* table = m_spreadsheet->getTableAt(index.row(), index.column());
             if (table && table->hasHeaderRow && index.row() == table->range.getStart().row) {
                 return table->theme.headerFg;
@@ -125,11 +133,7 @@ QVariant SpreadsheetModel::data(const QModelIndex& index, int role) const {
             return QColor(style.foregroundColor);
         }
         case Qt::BackgroundRole: {
-            const auto& baseStyle = cell->getStyle();
-            CellAddress addr(index.row(), index.column());
-            auto cellValue = m_spreadsheet->getCellValue(addr);
-            CellStyle style = m_spreadsheet->getConditionalFormatting().getEffectiveStyle(addr, cellValue, baseStyle);
-            // Check if cell is in a table
+            // Check table first (common case for styled regions)
             auto* table = m_spreadsheet->getTableAt(index.row(), index.column());
             if (table) {
                 int tableStartRow = table->range.getStart().row;
@@ -144,32 +148,38 @@ QVariant SpreadsheetModel::data(const QModelIndex& index, int role) const {
             }
             // Highlight invalid cells with red tint
             if (m_highlightInvalid) {
+                CellAddress addr(index.row(), index.column());
                 QString cellText = m_spreadsheet->getCellValue(addr).toString();
                 if (!cellText.isEmpty() && !m_spreadsheet->validateCell(index.row(), index.column(), cellText)) {
-                    return QColor(255, 200, 200); // Light red
+                    return QColor(255, 200, 200);
                 }
             }
+            // Fast path: default style = white background
+            if (!hasCustomStyle && m_spreadsheet->getConditionalFormatting().getAllRules().empty()) {
+                return QVariant(); // Default background (white)
+            }
+            CellAddress addr(index.row(), index.column());
+            auto cellValue = m_spreadsheet->getCellValue(addr);
+            CellStyle style = m_spreadsheet->getConditionalFormatting().getEffectiveStyle(addr, cellValue, baseStyle);
             return QColor(style.backgroundColor);
         }
         case Qt::TextAlignmentRole: {
-            const auto& style = cell->getStyle();
-
             // Vertical alignment
             int alignment = 0;
-            if (style.vAlign == VerticalAlignment::Top) {
+            if (baseStyle.vAlign == VerticalAlignment::Top) {
                 alignment |= Qt::AlignTop;
-            } else if (style.vAlign == VerticalAlignment::Bottom) {
+            } else if (baseStyle.vAlign == VerticalAlignment::Bottom) {
                 alignment |= Qt::AlignBottom;
             } else {
                 alignment |= Qt::AlignVCenter;
             }
 
             // Horizontal alignment
-            if (style.hAlign == HorizontalAlignment::Left) {
+            if (baseStyle.hAlign == HorizontalAlignment::Left) {
                 alignment |= Qt::AlignLeft;
-            } else if (style.hAlign == HorizontalAlignment::Right) {
+            } else if (baseStyle.hAlign == HorizontalAlignment::Right) {
                 alignment |= Qt::AlignRight;
-            } else if (style.hAlign == HorizontalAlignment::Center) {
+            } else if (baseStyle.hAlign == HorizontalAlignment::Center) {
                 alignment |= Qt::AlignHCenter;
             } else {
                 // General: right-align numbers, left-align text

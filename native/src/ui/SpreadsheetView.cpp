@@ -67,7 +67,7 @@ void SpreadsheetView::initializeView() {
 
     // Column/row sizing
     horizontalHeader()->setDefaultSectionSize(80);
-    verticalHeader()->setDefaultSectionSize(22);
+    verticalHeader()->setDefaultSectionSize(25);
     horizontalHeader()->setStretchLastSection(false);
     verticalHeader()->setStretchLastSection(false);
     horizontalHeader()->setMinimumSectionSize(30);
@@ -390,26 +390,28 @@ void SpreadsheetView::selectAll() {
 void SpreadsheetView::applyStyleChange(std::function<void(CellStyle&)> modifier, const QList<int>& roles) {
     if (!m_spreadsheet) return;
 
-    QModelIndexList selected = selectionModel()->selectedIndexes();
-    if (selected.isEmpty()) return;
+    // Use selection ranges (compact) instead of selectedIndexes() (one per cell — very slow for Select All)
+    QItemSelection sel = selectionModel()->selection();
+    if (sel.isEmpty()) return;
 
-    // For large selections (>5000 cells), only apply to occupied cells
+    // Compute bounding box from selection ranges — O(ranges) not O(cells)
+    int minRow = INT_MAX, maxRow = 0, minCol = INT_MAX, maxCol = 0;
+    int totalCells = 0;
+    for (const auto& range : sel) {
+        minRow = qMin(minRow, range.top());
+        maxRow = qMax(maxRow, range.bottom());
+        minCol = qMin(minCol, range.left());
+        maxCol = qMax(maxCol, range.right());
+        totalCells += (range.bottom() - range.top() + 1) * (range.right() - range.left() + 1);
+    }
+
     static constexpr int LARGE_SELECTION_THRESHOLD = 5000;
-    bool isLargeSelection = selected.size() > LARGE_SELECTION_THRESHOLD;
+    bool isLargeSelection = totalCells > LARGE_SELECTION_THRESHOLD;
 
     std::vector<CellSnapshot> before, after;
 
     if (isLargeSelection) {
-        // Build a bounding box from selection, then iterate only occupied cells
-        int minRow = INT_MAX, maxRow = 0, minCol = INT_MAX, maxCol = 0;
-        for (const auto& idx : selected) {
-            minRow = qMin(minRow, idx.row());
-            maxRow = qMax(maxRow, idx.row());
-            minCol = qMin(minCol, idx.column());
-            maxCol = qMax(maxCol, idx.column());
-        }
-
-        // Use forEachCell to iterate only occupied cells within the selection bounds
+        // Only apply to occupied cells within the selection bounds
         m_spreadsheet->forEachCell([&](int row, int col, const Cell&) {
             if (row < minRow || row > maxRow || col < minCol || col > maxCol) return;
 
@@ -424,6 +426,7 @@ void SpreadsheetView::applyStyleChange(std::function<void(CellStyle&)> modifier,
             after.push_back(m_spreadsheet->takeCellSnapshot(addr));
         });
     } else {
+        QModelIndexList selected = selectionModel()->selectedIndexes();
         for (const auto& index : selected) {
             CellAddress addr(index.row(), index.column());
             before.push_back(m_spreadsheet->takeCellSnapshot(addr));
@@ -442,12 +445,11 @@ void SpreadsheetView::applyStyleChange(std::function<void(CellStyle&)> modifier,
             std::make_unique<StyleChangeCommand>(before, after), m_spreadsheet.get());
     }
 
+    // Use dataChanged instead of resetModel to preserve the selection
     if (m_model) {
-        if (isLargeSelection) {
-            m_model->resetModel();
-        } else {
-            emit m_model->dataChanged(selected.first(), selected.last(), {roles.begin(), roles.end()});
-        }
+        QModelIndex topLeft = m_model->index(minRow, minCol);
+        QModelIndex bottomRight = m_model->index(maxRow, maxCol);
+        emit m_model->dataChanged(topLeft, bottomRight, {roles.begin(), roles.end()});
     }
 }
 
@@ -1810,6 +1812,8 @@ void SpreadsheetView::keyPressEvent(QKeyEvent* event) {
     }
 
     // ===== Ctrl/Cmd+Arrow: Jump to edge of data region =====
+    // Uses sparse cell map scan + binary search instead of row-by-row iteration.
+    // This makes navigation O(total_cells) instead of O(grid_rows), critical for 1M+ row sheets.
     if (ctrl && !shift && (event->key() == Qt::Key_Up || event->key() == Qt::Key_Down ||
                            event->key() == Qt::Key_Left || event->key() == Qt::Key_Right)) {
         QModelIndex cur = currentIndex();
@@ -1820,40 +1824,77 @@ void SpreadsheetView::keyPressEvent(QKeyEvent* event) {
         int maxRow = m_spreadsheet->getRowCount() - 1;
         int maxCol = m_spreadsheet->getColumnCount() - 1;
 
-        auto hasData = [this](int r, int c) -> bool {
-            auto val = m_spreadsheet->getCellValue(CellAddress(r, c));
-            return val.isValid() && !val.toString().isEmpty();
-        };
-
-        if (event->key() == Qt::Key_Up) {
-            if (row == 0) { /* already at top */ }
-            else if (hasData(row - 1, col)) {
-                // Move up through data until hitting empty cell or top
-                while (row > 0 && hasData(row - 1, col)) row--;
-            } else {
-                // Move up through empty cells until hitting data or top
-                while (row > 0 && !hasData(row - 1, col)) row--;
+        if (event->key() == Qt::Key_Up || event->key() == Qt::Key_Down) {
+            auto occupied = m_spreadsheet->getOccupiedRowsInColumn(col);
+            if (event->key() == Qt::Key_Down) {
+                if (row < maxRow) {
+                    auto it = std::upper_bound(occupied.begin(), occupied.end(), row);
+                    bool nextHasData = (it != occupied.end() && *it == row + 1);
+                    if (nextHasData) {
+                        // Walk contiguous data block downward
+                        int last = row + 1;
+                        ++it;
+                        while (it != occupied.end() && *it == last + 1) { last = *it; ++it; }
+                        row = last;
+                    } else {
+                        // Jump to next non-empty row, or grid bottom
+                        row = (it != occupied.end()) ? *it : maxRow;
+                    }
+                }
+            } else { // Key_Up
+                if (row > 0) {
+                    auto prevIt = std::lower_bound(occupied.begin(), occupied.end(), row - 1);
+                    bool prevHasData = (prevIt != occupied.end() && *prevIt == row - 1);
+                    if (prevHasData) {
+                        // Walk contiguous data block upward
+                        int first = row - 1;
+                        while (prevIt != occupied.begin()) {
+                            auto before = std::prev(prevIt);
+                            if (*before != first - 1) break;
+                            first = *before;
+                            prevIt = before;
+                        }
+                        row = first;
+                    } else {
+                        // Jump to prev non-empty row, or grid top
+                        auto it = std::lower_bound(occupied.begin(), occupied.end(), row);
+                        row = (it != occupied.begin()) ? *std::prev(it) : 0;
+                    }
+                }
             }
-        } else if (event->key() == Qt::Key_Down) {
-            if (row >= maxRow) { /* already at bottom */ }
-            else if (hasData(row + 1, col)) {
-                while (row < maxRow && hasData(row + 1, col)) row++;
-            } else {
-                while (row < maxRow && !hasData(row + 1, col)) row++;
-            }
-        } else if (event->key() == Qt::Key_Left) {
-            if (col == 0) { /* already at left */ }
-            else if (hasData(row, col - 1)) {
-                while (col > 0 && hasData(row, col - 1)) col--;
-            } else {
-                while (col > 0 && !hasData(row, col - 1)) col--;
-            }
-        } else if (event->key() == Qt::Key_Right) {
-            if (col >= maxCol) { /* already at right */ }
-            else if (hasData(row, col + 1)) {
-                while (col < maxCol && hasData(row, col + 1)) col++;
-            } else {
-                while (col < maxCol && !hasData(row, col + 1)) col++;
+        } else { // Key_Left or Key_Right
+            auto occupied = m_spreadsheet->getOccupiedColsInRow(row);
+            if (event->key() == Qt::Key_Right) {
+                if (col < maxCol) {
+                    auto it = std::upper_bound(occupied.begin(), occupied.end(), col);
+                    bool nextHasData = (it != occupied.end() && *it == col + 1);
+                    if (nextHasData) {
+                        int last = col + 1;
+                        ++it;
+                        while (it != occupied.end() && *it == last + 1) { last = *it; ++it; }
+                        col = last;
+                    } else {
+                        col = (it != occupied.end()) ? *it : maxCol;
+                    }
+                }
+            } else { // Key_Left
+                if (col > 0) {
+                    auto prevIt = std::lower_bound(occupied.begin(), occupied.end(), col - 1);
+                    bool prevHasData = (prevIt != occupied.end() && *prevIt == col - 1);
+                    if (prevHasData) {
+                        int first = col - 1;
+                        while (prevIt != occupied.begin()) {
+                            auto before = std::prev(prevIt);
+                            if (*before != first - 1) break;
+                            first = *before;
+                            prevIt = before;
+                        }
+                        col = first;
+                    } else {
+                        auto it = std::lower_bound(occupied.begin(), occupied.end(), col);
+                        col = (it != occupied.begin()) ? *std::prev(it) : 0;
+                    }
+                }
             }
         }
 
@@ -1891,6 +1932,7 @@ void SpreadsheetView::keyPressEvent(QKeyEvent* event) {
     }
 
     // ===== Ctrl+Shift+Arrow: Extend selection to data edge =====
+    // Same sparse-map navigation as Ctrl+Arrow above, but extends selection.
     if (ctrl && shift && (event->key() == Qt::Key_Up || event->key() == Qt::Key_Down ||
                            event->key() == Qt::Key_Left || event->key() == Qt::Key_Right)) {
         QModelIndex cur = currentIndex();
@@ -1901,34 +1943,73 @@ void SpreadsheetView::keyPressEvent(QKeyEvent* event) {
         int maxRowIdx = m_spreadsheet->getRowCount() - 1;
         int maxColIdx = m_spreadsheet->getColumnCount() - 1;
 
-        auto hasData = [this](int r, int c) -> bool {
-            auto val = m_spreadsheet->getCellValue(CellAddress(r, c));
-            return val.isValid() && !val.toString().isEmpty();
-        };
-
-        if (event->key() == Qt::Key_Up) {
-            if (row > 0 && hasData(row - 1, col)) {
-                while (row > 0 && hasData(row - 1, col)) row--;
+        if (event->key() == Qt::Key_Up || event->key() == Qt::Key_Down) {
+            auto occupied = m_spreadsheet->getOccupiedRowsInColumn(col);
+            if (event->key() == Qt::Key_Down) {
+                if (row < maxRowIdx) {
+                    auto it = std::upper_bound(occupied.begin(), occupied.end(), row);
+                    bool nextHasData = (it != occupied.end() && *it == row + 1);
+                    if (nextHasData) {
+                        int last = row + 1;
+                        ++it;
+                        while (it != occupied.end() && *it == last + 1) { last = *it; ++it; }
+                        row = last;
+                    } else {
+                        row = (it != occupied.end()) ? *it : maxRowIdx;
+                    }
+                }
             } else {
-                while (row > 0 && !hasData(row - 1, col)) row--;
+                if (row > 0) {
+                    auto prevIt = std::lower_bound(occupied.begin(), occupied.end(), row - 1);
+                    bool prevHasData = (prevIt != occupied.end() && *prevIt == row - 1);
+                    if (prevHasData) {
+                        int first = row - 1;
+                        while (prevIt != occupied.begin()) {
+                            auto before = std::prev(prevIt);
+                            if (*before != first - 1) break;
+                            first = *before;
+                            prevIt = before;
+                        }
+                        row = first;
+                    } else {
+                        auto it = std::lower_bound(occupied.begin(), occupied.end(), row);
+                        row = (it != occupied.begin()) ? *std::prev(it) : 0;
+                    }
+                }
             }
-        } else if (event->key() == Qt::Key_Down) {
-            if (row < maxRowIdx && hasData(row + 1, col)) {
-                while (row < maxRowIdx && hasData(row + 1, col)) row++;
+        } else {
+            auto occupied = m_spreadsheet->getOccupiedColsInRow(row);
+            if (event->key() == Qt::Key_Right) {
+                if (col < maxColIdx) {
+                    auto it = std::upper_bound(occupied.begin(), occupied.end(), col);
+                    bool nextHasData = (it != occupied.end() && *it == col + 1);
+                    if (nextHasData) {
+                        int last = col + 1;
+                        ++it;
+                        while (it != occupied.end() && *it == last + 1) { last = *it; ++it; }
+                        col = last;
+                    } else {
+                        col = (it != occupied.end()) ? *it : maxColIdx;
+                    }
+                }
             } else {
-                while (row < maxRowIdx && !hasData(row + 1, col)) row++;
-            }
-        } else if (event->key() == Qt::Key_Left) {
-            if (col > 0 && hasData(row, col - 1)) {
-                while (col > 0 && hasData(row, col - 1)) col--;
-            } else {
-                while (col > 0 && !hasData(row, col - 1)) col--;
-            }
-        } else if (event->key() == Qt::Key_Right) {
-            if (col < maxColIdx && hasData(row, col + 1)) {
-                while (col < maxColIdx && hasData(row, col + 1)) col++;
-            } else {
-                while (col < maxColIdx && !hasData(row, col + 1)) col++;
+                if (col > 0) {
+                    auto prevIt = std::lower_bound(occupied.begin(), occupied.end(), col - 1);
+                    bool prevHasData = (prevIt != occupied.end() && *prevIt == col - 1);
+                    if (prevHasData) {
+                        int first = col - 1;
+                        while (prevIt != occupied.begin()) {
+                            auto before = std::prev(prevIt);
+                            if (*before != first - 1) break;
+                            first = *before;
+                            prevIt = before;
+                        }
+                        col = first;
+                    } else {
+                        auto it = std::lower_bound(occupied.begin(), occupied.end(), col);
+                        col = (it != occupied.begin()) ? *std::prev(it) : 0;
+                    }
+                }
             }
         }
 

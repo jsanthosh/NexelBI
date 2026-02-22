@@ -214,6 +214,16 @@ FormulaEngine& Spreadsheet::getFormulaEngine() { return *m_formulaEngine; }
 void Spreadsheet::setAutoRecalculate(bool enabled) { m_autoRecalculate = enabled; }
 bool Spreadsheet::getAutoRecalculate() const { return m_autoRecalculate; }
 
+Cell* Spreadsheet::getOrCreateCellFast(int row, int col) {
+    auto& ptr = m_cells[CellKey{row, col}];
+    if (!ptr) ptr = std::make_shared<Cell>();
+    return ptr.get();
+}
+
+void Spreadsheet::finishBulkImport() {
+    m_maxRowColDirty = true;
+}
+
 void Spreadsheet::setRowHeight(int row, int height) { m_rowHeights[row] = height; }
 void Spreadsheet::setColumnWidth(int col, int width) { m_columnWidths[col] = width; }
 int Spreadsheet::getRowHeight(int row) const { auto it = m_rowHeights.find(row); return it != m_rowHeights.end() ? it->second : 0; }
@@ -468,6 +478,29 @@ const Spreadsheet::DataValidationRule* Spreadsheet::getValidationAt(int row, int
     for (const auto& rule : m_validationRules)
         if (rule.range.contains(row, col)) return &rule;
     return nullptr;
+}
+
+// ============== Fast Cell Navigation ==============
+std::vector<int> Spreadsheet::getOccupiedRowsInColumn(int col) const {
+    std::vector<int> rows;
+    for (const auto& [key, cell] : m_cells) {
+        if (key.col == col && cell && cell->getType() != CellType::Empty) {
+            rows.push_back(key.row);
+        }
+    }
+    std::sort(rows.begin(), rows.end());
+    return rows;
+}
+
+std::vector<int> Spreadsheet::getOccupiedColsInRow(int row) const {
+    std::vector<int> cols;
+    for (const auto& [key, cell] : m_cells) {
+        if (key.row == row && cell && cell->getType() != CellType::Empty) {
+            cols.push_back(key.col);
+        }
+    }
+    std::sort(cols.begin(), cols.end());
+    return cols;
 }
 
 bool Spreadsheet::validateCell(int row, int col, const QString& value) const {

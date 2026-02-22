@@ -147,6 +147,16 @@ public:
     bool getAutoRecalculate() const;
     void reserveCells(size_t count) { m_cells.reserve(count); }
 
+    // Fast bulk import — bypasses dependency tracking, recalculation, and dirty flags.
+    // Caller MUST call setAutoRecalculate(false) before and finishBulkImport() after.
+    Cell* getOrCreateCellFast(int row, int col);
+    void finishBulkImport();
+
+    // Fast cell navigation — scans sparse cell map O(total_cells) instead of O(grid_rows).
+    // Returns sorted vectors of occupied row/col indices for a given column/row.
+    std::vector<int> getOccupiedRowsInColumn(int col) const;
+    std::vector<int> getOccupiedColsInRow(int row) const;
+
     // Sparklines
     void setSparkline(const CellAddress& addr, const SparklineConfig& config);
     void removeSparkline(const CellAddress& addr);

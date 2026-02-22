@@ -45,6 +45,10 @@
 #include <QDockWidget>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QProgressDialog>
+#include <QtConcurrent>
+#include <QFutureWatcher>
+#include <QElapsedTimer>
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent) {
@@ -755,103 +759,141 @@ void MainWindow::openFile(const QString& fileName) {
     m_currentFilePath = fileName;
     QString ext = QFileInfo(fileName).suffix().toLower();
 
+    // Progress dialog for large files — indeterminate progress bar
+    auto* progress = new QProgressDialog(
+        "Opening " + QFileInfo(fileName).fileName() + "...",
+        QString(), 0, 0, this);
+    progress->setWindowModality(Qt::WindowModal);
+    progress->setMinimumDuration(400); // Only show for files that take >400ms
+    progress->setCancelButton(nullptr);
+
+    QElapsedTimer timer;
+    timer.start();
+
     if (ext == "xlsx" || ext == "xls") {
-        auto result = XlsxService::importFromFile(fileName);
-        if (!result.sheets.empty()) {
-            setSheets(result.sheets);
-            setWindowTitle("Nexel - " + QFileInfo(fileName).fileName());
+        auto* watcher = new QFutureWatcher<XlsxImportResult>(this);
+        connect(watcher, &QFutureWatcher<XlsxImportResult>::finished, this,
+            [this, watcher, progress, fileName, timer]() {
+                progress->close();
+                progress->deleteLater();
+                auto result = watcher->result();
+                watcher->deleteLater();
+                finishXlsxOpen(result, fileName, timer.elapsed());
+            });
+        watcher->setFuture(QtConcurrent::run(&XlsxService::importFromFile, fileName));
+    } else {
+        auto* watcher = new QFutureWatcher<std::shared_ptr<Spreadsheet>>(this);
+        connect(watcher, &QFutureWatcher<std::shared_ptr<Spreadsheet>>::finished, this,
+            [this, watcher, progress, fileName, timer]() {
+                progress->close();
+                progress->deleteLater();
+                auto spreadsheet = watcher->result();
+                watcher->deleteLater();
+                finishCsvOpen(spreadsheet, fileName, timer.elapsed());
+            });
+        watcher->setFuture(QtConcurrent::run(&CsvService::importFromFile, fileName));
+    }
+}
 
-            // Create chart widgets from imported charts
-            static const QVector<QColor> excelColors = {
-                QColor("#4472C4"), QColor("#ED7D31"), QColor("#A5A5A5"),
-                QColor("#FFC000"), QColor("#5B9BD5"), QColor("#70AD47"),
-                QColor("#264478"), QColor("#9E480E"), QColor("#636363")
-            };
+void MainWindow::finishXlsxOpen(const XlsxImportResult& result, const QString& fileName, qint64 elapsedMs) {
+    if (!result.sheets.empty()) {
+        setSheets(result.sheets);
+        setWindowTitle("Nexel - " + QFileInfo(fileName).fileName());
 
-            for (const auto& imported : result.charts) {
-                ChartConfig config;
+        // Create chart widgets from imported charts
+        static const QVector<QColor> excelColors = {
+            QColor("#4472C4"), QColor("#ED7D31"), QColor("#A5A5A5"),
+            QColor("#FFC000"), QColor("#5B9BD5"), QColor("#70AD47"),
+            QColor("#264478"), QColor("#9E480E"), QColor("#636363")
+        };
 
-                // Map chart type string to enum
-                if (imported.chartType == "line") config.type = ChartType::Line;
-                else if (imported.chartType == "bar") config.type = ChartType::Bar;
-                else if (imported.chartType == "scatter") config.type = ChartType::Scatter;
-                else if (imported.chartType == "pie") config.type = ChartType::Pie;
-                else if (imported.chartType == "area") config.type = ChartType::Area;
-                else if (imported.chartType == "donut") config.type = ChartType::Donut;
-                else if (imported.chartType == "histogram") config.type = ChartType::Histogram;
-                else config.type = ChartType::Column;
+        for (const auto& imported : result.charts) {
+            ChartConfig config;
 
-                config.title = imported.title;
-                config.xAxisTitle = imported.xAxisTitle;
-                config.yAxisTitle = imported.yAxisTitle;
+            if (imported.chartType == "line") config.type = ChartType::Line;
+            else if (imported.chartType == "bar") config.type = ChartType::Bar;
+            else if (imported.chartType == "scatter") config.type = ChartType::Scatter;
+            else if (imported.chartType == "pie") config.type = ChartType::Pie;
+            else if (imported.chartType == "area") config.type = ChartType::Area;
+            else if (imported.chartType == "donut") config.type = ChartType::Donut;
+            else if (imported.chartType == "histogram") config.type = ChartType::Histogram;
+            else config.type = ChartType::Column;
 
-                // Convert imported series to ChartSeries
-                for (int i = 0; i < imported.series.size(); ++i) {
-                    ChartSeries s;
-                    s.name = imported.series[i].name;
-                    s.yValues = imported.series[i].values;
+            config.title = imported.title;
+            config.xAxisTitle = imported.xAxisTitle;
+            config.yAxisTitle = imported.yAxisTitle;
 
-                    // Use numeric x values if available (scatter), otherwise indices
-                    if (!imported.series[i].xNumeric.isEmpty()) {
-                        s.xValues = imported.series[i].xNumeric;
-                    } else {
-                        s.xValues.resize(s.yValues.size());
-                        for (int j = 0; j < s.yValues.size(); ++j) {
-                            s.xValues[j] = j;
-                        }
+            for (int i = 0; i < imported.series.size(); ++i) {
+                ChartSeries s;
+                s.name = imported.series[i].name;
+                s.yValues = imported.series[i].values;
+
+                if (!imported.series[i].xNumeric.isEmpty()) {
+                    s.xValues = imported.series[i].xNumeric;
+                } else {
+                    s.xValues.resize(s.yValues.size());
+                    for (int j = 0; j < s.yValues.size(); ++j) {
+                        s.xValues[j] = j;
                     }
-                    s.color = excelColors[i % excelColors.size()];
-                    config.series.append(s);
                 }
-
-                int si = imported.sheetIndex;
-                if (si < 0 || si >= static_cast<int>(m_sheets.size())) continue;
-
-                auto* chart = new ChartWidget(m_spreadsheetView->viewport());
-                chart->setSpreadsheet(m_sheets[si]);
-                chart->setConfig(config);
-                chart->setGeometry(imported.x, imported.y, imported.width, imported.height);
-
-                connect(chart, &ChartWidget::editRequested, this, &MainWindow::onEditChart);
-                connect(chart, &ChartWidget::deleteRequested, this, &MainWindow::onDeleteChart);
-                connect(chart, &ChartWidget::propertiesRequested, this, &MainWindow::onChartPropertiesRequested);
-                connect(chart, &ChartWidget::chartSelected, this, [this](ChartWidget* c) {
-                    int idx = c->property("sheetIndex").toInt();
-                    for (auto* other : m_charts) if (other != c && other->property("sheetIndex").toInt() == idx) other->setSelected(false);
-                    for (auto* s : m_shapes) if (s->property("sheetIndex").toInt() == idx) s->setSelected(false);
-                    highlightChartDataRange(c);
-                });
-
-                chart->setProperty("sheetIndex", si);
-                chart->setVisible(si == m_activeSheetIndex);
-                if (si == m_activeSheetIndex) {
-                    chart->show();
-                    chart->raise();
-                    chart->startEntryAnimation();
-                }
-                m_charts.append(chart);
+                s.color = excelColors[i % excelColors.size()];
+                config.series.append(s);
             }
 
-            int chartCount = static_cast<int>(result.charts.size());
-            if (chartCount > 0) {
-                statusBar()->showMessage(QString("Opened: %1 (%2 chart(s) imported)").arg(fileName).arg(chartCount));
-            } else {
-                statusBar()->showMessage("Opened: " + fileName);
+            int si = imported.sheetIndex;
+            if (si < 0 || si >= static_cast<int>(m_sheets.size())) continue;
+
+            auto* chart = new ChartWidget(m_spreadsheetView->viewport());
+            chart->setSpreadsheet(m_sheets[si]);
+            chart->setConfig(config);
+            chart->setGeometry(imported.x, imported.y, imported.width, imported.height);
+
+            connect(chart, &ChartWidget::editRequested, this, &MainWindow::onEditChart);
+            connect(chart, &ChartWidget::deleteRequested, this, &MainWindow::onDeleteChart);
+            connect(chart, &ChartWidget::propertiesRequested, this, &MainWindow::onChartPropertiesRequested);
+            connect(chart, &ChartWidget::chartSelected, this, [this](ChartWidget* c) {
+                int idx = c->property("sheetIndex").toInt();
+                for (auto* other : m_charts) if (other != c && other->property("sheetIndex").toInt() == idx) other->setSelected(false);
+                for (auto* s : m_shapes) if (s->property("sheetIndex").toInt() == idx) s->setSelected(false);
+                highlightChartDataRange(c);
+            });
+
+            chart->setProperty("sheetIndex", si);
+            chart->setVisible(si == m_activeSheetIndex);
+            if (si == m_activeSheetIndex) {
+                chart->show();
+                chart->raise();
+                chart->startEntryAnimation();
             }
+            m_charts.append(chart);
+        }
+
+        int chartCount = static_cast<int>(result.charts.size());
+        double secs = elapsedMs / 1000.0;
+        if (chartCount > 0) {
+            statusBar()->showMessage(QString("Opened: %1 (%2 chart(s)) in %3s")
+                .arg(QFileInfo(fileName).fileName()).arg(chartCount).arg(secs, 0, 'f', 1));
         } else {
-            QMessageBox::warning(this, "Open Failed", "Could not open file: " + fileName);
+            statusBar()->showMessage(QString("Opened: %1 in %2s")
+                .arg(QFileInfo(fileName).fileName()).arg(secs, 0, 'f', 1));
         }
     } else {
-        auto spreadsheet = CsvService::importFromFile(fileName);
-        if (spreadsheet) {
-            spreadsheet->setSheetName(QFileInfo(fileName).baseName());
-            std::vector<std::shared_ptr<Spreadsheet>> sheets = { spreadsheet };
-            setSheets(sheets);
-            setWindowTitle("Nexel - " + QFileInfo(fileName).fileName());
-            statusBar()->showMessage("Opened: " + fileName);
-        } else {
-            QMessageBox::warning(this, "Open Failed", "Could not open file: " + fileName);
-        }
+        QMessageBox::warning(this, "Open Failed", "Could not open file: " + fileName);
+    }
+}
+
+void MainWindow::finishCsvOpen(const std::shared_ptr<Spreadsheet>& spreadsheet,
+                                const QString& fileName, qint64 elapsedMs) {
+    if (spreadsheet) {
+        spreadsheet->setSheetName(QFileInfo(fileName).baseName());
+        std::vector<std::shared_ptr<Spreadsheet>> sheets = { spreadsheet };
+        setSheets(sheets);
+        setWindowTitle("Nexel - " + QFileInfo(fileName).fileName());
+        double secs = elapsedMs / 1000.0;
+        statusBar()->showMessage(QString("Opened: %1 in %2s")
+            .arg(QFileInfo(fileName).fileName()).arg(secs, 0, 'f', 1));
+    } else {
+        QMessageBox::warning(this, "Open Failed", "Could not open file: " + fileName);
     }
 }
 

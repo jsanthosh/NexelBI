@@ -1,6 +1,5 @@
 #include "CsvService.h"
 #include <QFile>
-#include <QApplication>
 #include <cstring>
 #include <cstdlib>
 
@@ -163,9 +162,10 @@ std::shared_ptr<Spreadsheet> CsvService::importFromFile(const QString& filePath)
 
                 int fLen = static_cast<int>(fEnd - fStart);
                 if (fLen > 0) {
-                    CellAddress addr(row, col);
+                    // Use fast import path — bypasses dependency tracking
+                    Cell* cell = spreadsheet->getOrCreateCellFast(row, col);
 
-                    // Fast numeric detection using strtod with stack buffer
+                    // Fast numeric detection using strtod
                     bool isNum = false;
                     char firstCh = *fStart;
                     if ((firstCh >= '0' && firstCh <= '9') || firstCh == '-' || firstCh == '+' || firstCh == '.') {
@@ -176,7 +176,7 @@ std::shared_ptr<Spreadsheet> CsvService::importFromFile(const QString& filePath)
                             char* endPtr = nullptr;
                             double numValue = strtod(numBuf, &endPtr);
                             if (endPtr == numBuf + fLen) {
-                                spreadsheet->setCellValue(addr, numValue);
+                                cell->setValue(numValue);
                                 isNum = true;
                             }
                         }
@@ -185,9 +185,9 @@ std::shared_ptr<Spreadsheet> CsvService::importFromFile(const QString& filePath)
                     if (!isNum) {
                         QString strValue = QString::fromUtf8(fStart, fLen);
                         if (firstCh == '=') {
-                            spreadsheet->setCellFormula(addr, strValue);
+                            cell->setFormula(strValue);
                         } else {
-                            spreadsheet->setCellValue(addr, strValue);
+                            cell->setValue(strValue);
                         }
                     }
                 }
@@ -213,12 +213,9 @@ std::shared_ptr<Spreadsheet> CsvService::importFromFile(const QString& filePath)
         } else if (pos < dataSize && data[pos] == '\n') {
             pos++;
         }
-
-        // Keep UI responsive every 10K rows
-        if (row % 10000 == 0) {
-            QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
-        }
     }
+
+    spreadsheet->finishBulkImport();
 
     // Set final dimensions
     spreadsheet->setRowCount(std::max(1000, row + 100));

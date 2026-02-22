@@ -187,7 +187,11 @@ QStringList XlsxService::parseSharedStrings(const QByteArray& xmlData) {
     while (!xml.atEnd()) {
         xml.readNext();
         if (xml.isStartElement()) {
-            if (xml.name() == u"si") {
+            if (xml.name() == u"sst") {
+                // Pre-reserve from uniqueCount to avoid QStringList reallocations
+                int count = xml.attributes().value("uniqueCount").toInt();
+                if (count > 0) strings.reserve(count);
+            } else if (xml.name() == u"si") {
                 inSi = true;
                 currentString.clear();
             }
@@ -566,25 +570,68 @@ bool XlsxService::isDateFormatCode(const QString& formatCode) {
     return false;
 }
 
+// Fast inline cell reference parser — avoids regex overhead for millions of cells.
+// Parses "A1", "AB123", "XFD1048576" etc. Returns false on failure.
+static bool parseCellRef(const QStringView& ref, int& outRow, int& outCol) {
+    const QChar* p = ref.data();
+    const int len = ref.size();
+    if (len == 0) return false;
+
+    // Parse column letters (A-Z)
+    int col = 0;
+    int i = 0;
+    while (i < len && p[i] >= u'A' && p[i] <= u'Z') {
+        col = col * 26 + (p[i].unicode() - 'A' + 1);
+        ++i;
+    }
+    if (i == 0 || i == len) return false; // No letters or no digits
+    outCol = col - 1; // 0-based
+
+    // Parse row digits
+    int row = 0;
+    while (i < len && p[i] >= u'0' && p[i] <= u'9') {
+        row = row * 10 + (p[i].unicode() - '0');
+        ++i;
+    }
+    if (i != len || row == 0) return false; // Trailing chars or row=0
+    outRow = row - 1; // 0-based (XLSX is 1-based)
+    return true;
+}
+
+// Fast inline range reference parser for "A1:B2" style strings
+static bool parseRangeRef(const QStringView& ref,
+                          int& startRow, int& startCol, int& endRow, int& endCol) {
+    int colonPos = -1;
+    for (int i = 0; i < ref.size(); ++i) {
+        if (ref[i] == u':') { colonPos = i; break; }
+    }
+    if (colonPos < 0) return false;
+    return parseCellRef(ref.left(colonPos), startRow, startCol) &&
+           parseCellRef(ref.mid(colonPos + 1), endRow, endCol);
+}
+
 void XlsxService::parseSheet(const QByteArray& xmlData, const QStringList& sharedStrings,
                               const std::vector<CellStyle>& styles, Spreadsheet* sheet) {
     QXmlStreamReader xml(xmlData);
 
-    static QRegularExpression cellRefRe("^([A-Z]+)(\\d+)$");
-    static QRegularExpression rangeRefRe("^([A-Z]+)(\\d+):([A-Z]+)(\\d+)$");
+    // Pre-reserve cell storage based on XML size heuristic (~100 bytes per cell element)
+    size_t estimatedCells = static_cast<size_t>(xmlData.size()) / 100;
+    if (estimatedCells > 4096) {
+        sheet->reserveCells(estimatedCells);
+    }
 
     while (!xml.atEnd()) {
         xml.readNext();
 
         // Parse column widths: <col min="1" max="3" width="15.5" customWidth="1"/>
         if (xml.isStartElement() && xml.name() == u"col") {
-            int minCol = xml.attributes().value("min").toInt() - 1; // XLSX is 1-based
+            int minCol = xml.attributes().value("min").toInt() - 1;
             int maxCol = xml.attributes().value("max").toInt() - 1;
             double width = xml.attributes().value("width").toDouble();
-            if (width > 0 && maxCol < 256) {
-                // Excel width units ≈ character widths; convert to pixels (approx 7.5px per unit)
+            if (width > 0) {
                 int pixelWidth = qMax(30, static_cast<int>(width * 7.5));
-                for (int c = minCol; c <= maxCol && c < 256; ++c) {
+                int colLimit = qMin(maxCol, 16383); // XLSX max: XFD = 16384 cols
+                for (int c = minCol; c <= colLimit; ++c) {
                     sheet->setColumnWidth(c, pixelWidth);
                 }
             }
@@ -595,49 +642,40 @@ void XlsxService::parseSheet(const QByteArray& xmlData, const QStringList& share
         if (xml.isStartElement() && xml.name() == u"row") {
             QString htStr = xml.attributes().value("ht").toString();
             if (!htStr.isEmpty()) {
-                int rowIdx = xml.attributes().value("r").toInt() - 1; // XLSX is 1-based
+                int rowIdx = xml.attributes().value("r").toInt() - 1;
                 double ht = htStr.toDouble();
                 if (ht > 0 && rowIdx >= 0) {
-                    // Excel height is in points; convert to pixels (1pt ≈ 1.333px)
                     int pixelHeight = qMax(14, static_cast<int>(ht * 1.333));
                     sheet->setRowHeight(rowIdx, pixelHeight);
                 }
             }
-            // Don't continue — row contains child <c> elements
+            continue; // row's child <c> elements will be hit next
         }
 
         // Parse merged cells: <mergeCell ref="A1:D1"/>
         if (xml.isStartElement() && xml.name() == u"mergeCell") {
-            QString ref = xml.attributes().value("ref").toString();
-            auto rangeMatch = rangeRefRe.match(ref);
-            if (rangeMatch.hasMatch()) {
-                int startCol = columnLetterToIndex(rangeMatch.captured(1));
-                int startRow = rangeMatch.captured(2).toInt() - 1;
-                int endCol = columnLetterToIndex(rangeMatch.captured(3));
-                int endRow = rangeMatch.captured(4).toInt() - 1;
-                CellRange range(CellAddress(startRow, startCol), CellAddress(endRow, endCol));
-                sheet->mergeCells(range);
+            QStringView ref = xml.attributes().value("ref");
+            int sr, sc, er, ec;
+            if (parseRangeRef(ref, sr, sc, er, ec)) {
+                sheet->mergeCells(CellRange(CellAddress(sr, sc), CellAddress(er, ec)));
             }
             continue;
         }
 
         if (xml.isStartElement() && xml.name() == u"c") {
-            QString ref = xml.attributes().value("r").toString();
-            QString type = xml.attributes().value("t").toString();
+            QStringView ref = xml.attributes().value("r");
+            QStringView type = xml.attributes().value("t");
             int styleIdx = xml.attributes().value("s").toInt();
 
-            auto match = cellRefRe.match(ref);
-            if (!match.hasMatch()) continue;
-
-            int col = columnLetterToIndex(match.captured(1));
-            int row = match.captured(2).toInt() - 1; // XLSX is 1-based
+            int row, col;
+            if (!parseCellRef(ref, row, col)) continue;
 
             // Read child elements: <f> (formula), <v> (value), <is> (inline string)
             QString value;
             QString formula;
             QString inlineStr;
             bool hasInlineStr = false;
-            int depth = 1; // track nesting depth within <c>
+            int depth = 1;
 
             while (!xml.atEnd() && depth > 0) {
                 xml.readNext();
@@ -647,7 +685,6 @@ void XlsxService::parseSheet(const QByteArray& xmlData, const QStringList& share
                     } else if (xml.name() == u"f") {
                         formula = xml.readElementText();
                     } else if (xml.name() == u"is") {
-                        // Inline string - read <t> children
                         hasInlineStr = true;
                     } else if (hasInlineStr && xml.name() == u"t") {
                         inlineStr += xml.readElementText();
@@ -656,100 +693,96 @@ void XlsxService::parseSheet(const QByteArray& xmlData, const QStringList& share
                     }
                 } else if (xml.isEndElement()) {
                     if (xml.name() == u"c") {
-                        depth = 0; // exit
+                        depth = 0;
                     } else if (xml.name() == u"is") {
                         hasInlineStr = false;
                     }
                 }
             }
 
-            CellAddress addr(row, col);
+            // Use fast path: getOrCreateCellFast returns Cell* (no shared_ptr overhead)
+            Cell* cell = nullptr;
             bool cellSet = false;
 
-            // If the cell has a formula, set it via setCellFormula
             if (!formula.isEmpty()) {
-                QString f = formula;
-                if (!f.startsWith('=')) f = "=" + f;
-                sheet->setCellFormula(addr, f);
+                cell = sheet->getOrCreateCellFast(row, col);
+                if (!formula.startsWith(u'=')) formula.prepend(u'=');
+                cell->setFormula(formula);
                 cellSet = true;
-                // Also set the cached value if present
-                if (!value.isEmpty() && type != "s") {
-                    // Numeric cached value - set directly so it displays before recalc
+                if (!value.isEmpty() && type != u"s") {
                     bool ok;
                     double num = value.toDouble(&ok);
-                    if (ok) {
-                        sheet->setCellValue(addr, num);
-                    }
+                    if (ok) cell->setComputedValue(num);
                 }
             }
-            // Handle inline strings first (type="inlineStr")
-            else if (type == "inlineStr" && !inlineStr.isEmpty()) {
-                sheet->setCellValue(addr, inlineStr);
+            else if (type == u"inlineStr" && !inlineStr.isEmpty()) {
+                cell = sheet->getOrCreateCellFast(row, col);
+                cell->setValue(inlineStr);
                 cellSet = true;
             }
-            // Handle shared string reference
-            else if (type == "s" && !value.isEmpty()) {
+            else if (type == u"s" && !value.isEmpty()) {
                 int ssIdx = value.toInt();
                 if (ssIdx >= 0 && ssIdx < sharedStrings.size()) {
-                    sheet->setCellValue(addr, sharedStrings[ssIdx]);
+                    cell = sheet->getOrCreateCellFast(row, col);
+                    cell->setValue(sharedStrings[ssIdx]);
                     cellSet = true;
                 }
             }
-            // Handle boolean
-            else if (type == "b" && !value.isEmpty()) {
-                sheet->setCellValue(addr, value == "1" ? "TRUE" : "FALSE");
+            else if (type == u"b" && !value.isEmpty()) {
+                cell = sheet->getOrCreateCellFast(row, col);
+                cell->setValue(value == u"1" ? QStringLiteral("TRUE") : QStringLiteral("FALSE"));
                 cellSet = true;
             }
-            // Handle string formula result (type="str")
-            else if (type == "str" && !value.isEmpty()) {
-                sheet->setCellValue(addr, value);
+            else if (type == u"str" && !value.isEmpty()) {
+                cell = sheet->getOrCreateCellFast(row, col);
+                cell->setValue(value);
                 cellSet = true;
             }
-            // Handle numeric / date values
             else if (!value.isEmpty()) {
                 bool ok;
                 double num = value.toDouble(&ok);
                 if (ok) {
-                    // Check if this cell has a Date/Time format - convert serial to date string
                     bool isDateFmt = false;
                     if (styleIdx > 0 && styleIdx < static_cast<int>(styles.size())) {
                         const auto& fmt = styles[styleIdx].numberFormat;
                         isDateFmt = (fmt == "Date" || fmt == "Time");
                     }
+                    cell = sheet->getOrCreateCellFast(row, col);
                     if (isDateFmt && num > 0 && num < 2958466) {
                         QDate epoch(1899, 12, 30);
                         QDate date = epoch.addDays(static_cast<qint64>(num));
                         if (date.isValid()) {
-                            sheet->setCellValue(addr, date.toString("MM/dd/yyyy"));
+                            cell->setValue(date.toString("MM/dd/yyyy"));
                         } else {
-                            sheet->setCellValue(addr, num);
+                            cell->setValue(num);
                         }
                     } else {
-                        sheet->setCellValue(addr, num);
+                        cell->setValue(num);
                     }
                 } else {
-                    sheet->setCellValue(addr, value);
+                    cell = sheet->getOrCreateCellFast(row, col);
+                    cell->setValue(value);
                 }
                 cellSet = true;
             }
 
-            // Apply style (even for cells without values, e.g. styled empty cells)
+            // Apply style
             if ((cellSet || styleIdx > 0) && styleIdx < static_cast<int>(styles.size())) {
-                auto cell = sheet->getCell(addr);
-                if (cell) {
-                    CellStyle cellStyle = styles[styleIdx];
-                    if ((cellStyle.numberFormat == "Date" || cellStyle.numberFormat == "Time")) {
-                        bool ok;
-                        double num = value.toDouble(&ok);
-                        if (ok && (num < 0 || num >= 2958466)) {
-                            cellStyle.numberFormat = "General";
-                        }
+                if (!cell) cell = sheet->getOrCreateCellFast(row, col);
+                CellStyle cellStyle = styles[styleIdx];
+                if ((cellStyle.numberFormat == "Date" || cellStyle.numberFormat == "Time")) {
+                    bool ok;
+                    double num = value.toDouble(&ok);
+                    if (ok && (num < 0 || num >= 2958466)) {
+                        cellStyle.numberFormat = "General";
                     }
-                    cell->setStyle(cellStyle);
                 }
+                cell->setStyle(cellStyle);
             }
         }
     }
+
+    sheet->finishBulkImport();
 }
 
 int XlsxService::columnLetterToIndex(const QString& letters) {

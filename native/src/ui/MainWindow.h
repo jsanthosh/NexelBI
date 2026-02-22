@@ -18,6 +18,7 @@ class FormulaBar;
 class Toolbar;
 class FormatCellsDialog;
 class FindReplaceDialog;
+struct XlsxImportResult;
 class ChatPanel;
 class ChartWidget;
 class ShapeWidget;
@@ -154,6 +155,10 @@ private:
     void refreshActiveCharts();
     void applyTemplate(const TemplateResult& result);
     void highlightChartDataRange(ChartWidget* chart);
+
+    // Background import completion handlers
+    void finishXlsxOpen(const XlsxImportResult& result, const QString& fileName, qint64 elapsedMs);
+    void finishCsvOpen(const std::shared_ptr<Spreadsheet>& spreadsheet, const QString& fileName, qint64 elapsedMs);
 
     // Macro engine
     MacroEngine* m_macroEngine = nullptr;

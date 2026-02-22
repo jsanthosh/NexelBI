@@ -10,8 +10,209 @@
 #include <QPixmap>
 #include <QMenu>
 #include <QPolygon>
+#include <QGridLayout>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QWidgetAction>
+#include <QFrame>
+#include <QPushButton>
 #include <functional>
 #include "../core/TableStyle.h"
+
+// ===== Color Palette Popup =====
+// Custom paint widget for a single color swatch — crisp, no stylesheet blur
+class ColorSwatch : public QWidget {
+public:
+    QColor color;
+    bool selected = false;
+    bool hovered = false;
+    std::function<void()> onClick;
+
+    ColorSwatch(const QColor& c, QWidget* parent) : QWidget(parent), color(c) {
+        setFixedSize(18, 18);
+        setCursor(Qt::PointingHandCursor);
+        setAttribute(Qt::WA_Hover, true);
+        setMouseTracking(true);
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing, false);
+        QRect r = rect();
+
+        // Fill
+        p.fillRect(r, color);
+
+        // Border
+        if (selected) {
+            p.setPen(QPen(QColor("#107C10"), 2));
+            p.drawRect(r.adjusted(0, 0, -1, -1));
+        } else if (hovered) {
+            p.setPen(QPen(QColor("#333333"), 2));
+            p.drawRect(r.adjusted(0, 0, -1, -1));
+        } else {
+            // Subtle border only for light colors
+            if (color.lightness() > 220) {
+                p.setPen(QPen(QColor("#D0D0D0"), 1));
+                p.drawRect(r.adjusted(0, 0, -1, -1));
+            }
+        }
+    }
+
+    void enterEvent(QEnterEvent*) override { hovered = true; update(); }
+    void leaveEvent(QEvent*) override { hovered = false; update(); }
+    void mousePressEvent(QMouseEvent*) override { if (onClick) onClick(); }
+};
+
+static QColor showColorPalette(QWidget* parent, const QColor& current, const QString& title) {
+    // Excel-style palette: 10 theme columns, each with light-to-dark gradient
+    static const QColor palette[] = {
+        // Row 1: Base theme colors
+        QColor("#C0392B"), QColor("#E67E22"), QColor("#F1C40F"), QColor("#2ECC71"),
+        QColor("#1ABC9C"), QColor("#3498DB"), QColor("#2980B9"), QColor("#9B59B6"),
+        QColor("#34495E"), QColor("#7F8C8D"),
+        // Row 2: Lightest tint
+        QColor("#FADBD8"), QColor("#FDEBD0"), QColor("#FEF9E7"), QColor("#D5F5E3"),
+        QColor("#D1F2EB"), QColor("#D6EAF8"), QColor("#D4E6F1"), QColor("#E8DAEF"),
+        QColor("#D5D8DC"), QColor("#E5E8E8"),
+        // Row 3: Light tint
+        QColor("#F1948A"), QColor("#F0B27A"), QColor("#F9E79F"), QColor("#82E0AA"),
+        QColor("#76D7C4"), QColor("#85C1E9"), QColor("#7FB3D8"), QColor("#C39BD3"),
+        QColor("#ABB2B9"), QColor("#BDC3C7"),
+        // Row 4: Medium
+        QColor("#E74C3C"), QColor("#EB984E"), QColor("#F4D03F"), QColor("#52BE80"),
+        QColor("#48C9B0"), QColor("#5DADE2"), QColor("#5499C7"), QColor("#AF7AC5"),
+        QColor("#808B96"), QColor("#95A5A6"),
+        // Row 5: Dark
+        QColor("#A93226"), QColor("#CA6F1E"), QColor("#D4AC0D"), QColor("#239B56"),
+        QColor("#17A589"), QColor("#2E86C1"), QColor("#2471A3"), QColor("#7D3C98"),
+        QColor("#2C3E50"), QColor("#717D7E"),
+        // Row 6: Darkest
+        QColor("#78281F"), QColor("#935116"), QColor("#9A7D0A"), QColor("#1E8449"),
+        QColor("#148F77"), QColor("#21618C"), QColor("#1A5276"), QColor("#6C3483"),
+        QColor("#1C2833"), QColor("#4D5656"),
+    };
+    // Row 7: Grayscale
+    static const QColor grayscale[] = {
+        QColor("#000000"), QColor("#1A1A1A"), QColor("#333333"), QColor("#4D4D4D"),
+        QColor("#666666"), QColor("#808080"), QColor("#999999"), QColor("#B3B3B3"),
+        QColor("#D9D9D9"), QColor("#FFFFFF"),
+    };
+
+    static const int COLS = 10;
+    static const int THEME_ROWS = 6;
+
+    QMenu menu(parent);
+    menu.setStyleSheet(
+        "QMenu { background: #FFFFFF; border: 1px solid #E0E0E0; padding: 0px; border-radius: 6px; }"
+    );
+
+    QWidget* container = new QWidget(&menu);
+    QVBoxLayout* layout = new QVBoxLayout(container);
+    layout->setContentsMargins(10, 8, 10, 8);
+    layout->setSpacing(0);
+
+    // Section: Theme Colors
+    QLabel* themeLabel = new QLabel("Theme Colors", container);
+    themeLabel->setStyleSheet("font: 11px 'Segoe UI', 'SF Pro Text', sans-serif; color: #666; padding-bottom: 4px;");
+    layout->addWidget(themeLabel);
+
+    QColor result;
+
+    // Theme color grid
+    QGridLayout* grid = new QGridLayout();
+    grid->setSpacing(3);
+    grid->setContentsMargins(0, 0, 0, 0);
+
+    for (int r = 0; r < THEME_ROWS; ++r) {
+        for (int c = 0; c < COLS; ++c) {
+            int idx = r * COLS + c;
+            ColorSwatch* swatch = new ColorSwatch(palette[idx], container);
+            swatch->selected = (palette[idx] == current);
+            swatch->setToolTip(palette[idx].name().toUpper());
+            swatch->onClick = [&result, &menu, idx]() {
+                result = palette[idx];
+                menu.close();
+            };
+            grid->addWidget(swatch, r, c);
+        }
+    }
+    layout->addLayout(grid);
+
+    // Separator
+    layout->addSpacing(6);
+    QFrame* sep1 = new QFrame(container);
+    sep1->setFrameShape(QFrame::HLine);
+    sep1->setStyleSheet("background: #E8E8E8; max-height: 1px;");
+    layout->addWidget(sep1);
+    layout->addSpacing(4);
+
+    // Section: Standard Colors (grayscale)
+    QLabel* stdLabel = new QLabel("Standard Colors", container);
+    stdLabel->setStyleSheet("font: 11px 'Segoe UI', 'SF Pro Text', sans-serif; color: #666; padding-bottom: 4px;");
+    layout->addWidget(stdLabel);
+
+    QHBoxLayout* grayRow = new QHBoxLayout();
+    grayRow->setSpacing(3);
+    grayRow->setContentsMargins(0, 0, 0, 0);
+    for (int c = 0; c < COLS; ++c) {
+        ColorSwatch* swatch = new ColorSwatch(grayscale[c], container);
+        swatch->selected = (grayscale[c] == current);
+        swatch->setToolTip(grayscale[c].name().toUpper());
+        swatch->onClick = [&result, &menu, c]() {
+            result = grayscale[c];
+            menu.close();
+        };
+        grayRow->addWidget(swatch);
+    }
+    layout->addLayout(grayRow);
+
+    // Separator
+    layout->addSpacing(6);
+    QFrame* sep2 = new QFrame(container);
+    sep2->setFrameShape(QFrame::HLine);
+    sep2->setStyleSheet("background: #E8E8E8; max-height: 1px;");
+    layout->addWidget(sep2);
+    layout->addSpacing(4);
+
+    // No Fill (for fill color only)
+    if (title.contains("Fill")) {
+        QPushButton* noFillBtn = new QPushButton("No Fill", container);
+        noFillBtn->setFixedHeight(26);
+        noFillBtn->setCursor(Qt::PointingHandCursor);
+        noFillBtn->setStyleSheet(
+            "QPushButton { background: transparent; border: none; font: 12px 'Segoe UI', 'SF Pro Text', sans-serif;"
+            "  color: #444; text-align: left; padding-left: 2px; }"
+            "QPushButton:hover { background: #F0F4F8; border-radius: 3px; }");
+        QObject::connect(noFillBtn, &QPushButton::clicked, &menu, [&result, &menu]() {
+            result = QColor("#FFFFFF");
+            menu.close();
+        });
+        layout->addWidget(noFillBtn);
+    }
+
+    // Custom Color button
+    QPushButton* customBtn = new QPushButton("Custom Color...", container);
+    customBtn->setFixedHeight(26);
+    customBtn->setCursor(Qt::PointingHandCursor);
+    customBtn->setStyleSheet(
+        "QPushButton { background: transparent; border: none; font: 12px 'Segoe UI', 'SF Pro Text', sans-serif;"
+        "  color: #2980B9; text-align: left; padding-left: 2px; }"
+        "QPushButton:hover { background: #F0F4F8; border-radius: 3px; }");
+    QObject::connect(customBtn, &QPushButton::clicked, &menu, [&result, &menu, parent, current, title]() {
+        menu.close();
+        result = QColorDialog::getColor(current, parent, title);
+    });
+    layout->addWidget(customBtn);
+
+    QWidgetAction* wa = new QWidgetAction(&menu);
+    wa->setDefaultWidget(container);
+    menu.addAction(wa);
+
+    menu.exec(QCursor::pos());
+    return result;
+}
 
 // ===== Modern Icon Helpers (high-DPI aware, 20x20) =====
 
@@ -580,7 +781,7 @@ void Toolbar::createActions() {
         "QToolButton { color: #C00000; font-weight: bold; border-bottom: 3px solid #C00000; border-radius: 4px; }");
     addWidget(fgColorBtn);
     connect(fgColorBtn, &QToolButton::clicked, this, [this, fgColorBtn]() {
-        QColor color = QColorDialog::getColor(m_lastFgColor, this, "Font Color");
+        QColor color = showColorPalette(this, m_lastFgColor, "Font Color");
         if (color.isValid()) {
             m_lastFgColor = color;
             fgColorBtn->setStyleSheet(
@@ -612,7 +813,7 @@ void Toolbar::createActions() {
         bgColorBtn->setIcon(QIcon(pix));
     }
     connect(bgColorBtn, &QToolButton::clicked, this, [this, bgColorBtn]() {
-        QColor color = QColorDialog::getColor(m_lastBgColor, this, "Fill Color");
+        QColor color = showColorPalette(this, m_lastBgColor, "Fill Color");
         if (color.isValid()) {
             m_lastBgColor = color;
             bgColorBtn->setStyleSheet(
