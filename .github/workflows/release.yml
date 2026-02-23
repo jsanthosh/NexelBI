@@ -43,6 +43,9 @@ jobs:
       - name: Code sign
         run: codesign --force --deep -s - native/install/NativeSpreadsheet.app
 
+      - name: Verify signature
+        run: codesign --verify --deep --strict native/install/NativeSpreadsheet.app
+
       - name: Create DMG
         run: |
           mkdir -p /tmp/nexel-dmg
@@ -51,6 +54,7 @@ jobs:
           hdiutil create -volname "Nexel" \
             -srcfolder /tmp/nexel-dmg \
             -ov -format UDZO \
+            -imagekey zlib-level=9 \
             Nexel-${{ github.ref_name }}-macOS-arm64.dmg
 
       - name: Upload artifact
@@ -93,6 +97,9 @@ jobs:
       - name: Code sign
         run: codesign --force --deep -s - native/install/NativeSpreadsheet.app
 
+      - name: Verify signature
+        run: codesign --verify --deep --strict native/install/NativeSpreadsheet.app
+
       - name: Create DMG
         run: |
           mkdir -p /tmp/nexel-dmg
@@ -101,6 +108,7 @@ jobs:
           hdiutil create -volname "Nexel" \
             -srcfolder /tmp/nexel-dmg \
             -ov -format UDZO \
+            -imagekey zlib-level=9 \
             Nexel-${{ github.ref_name }}-macOS-x64.dmg
 
       - name: Upload artifact
@@ -150,9 +158,26 @@ jobs:
             windeployqt $exePath.FullName --release --no-translations
           }
 
-      - name: Package
+      - name: Create portable package
         run: |
-          Compress-Archive -Path native/install/* -DestinationPath Nexel-${{ github.ref_name }}-Windows-x64.zip
+          # Create a clean distribution folder
+          $distDir = "Nexel-${{ github.ref_name }}-Windows-x64"
+          New-Item -ItemType Directory -Force -Path $distDir | Out-Null
+
+          # Copy installed files
+          if (Test-Path "native/install/bin") {
+            Copy-Item -Path "native/install/bin/*" -Destination $distDir -Recurse
+          } else {
+            Copy-Item -Path "native/install/*" -Destination $distDir -Recurse
+          }
+
+          # Rename exe to Nexel.exe
+          $exe = Get-ChildItem -Path $distDir -Filter "NativeSpreadsheet.exe" -Recurse | Select-Object -First 1
+          if ($exe) {
+            Rename-Item -Path $exe.FullName -NewName "Nexel.exe"
+          }
+
+          Compress-Archive -Path "$distDir/*" -DestinationPath "Nexel-${{ github.ref_name }}-Windows-x64.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -229,17 +254,17 @@ jobs:
 
           # Create icon
           mkdir -p native/AppDir/usr/share/icons/hicolor/256x256/apps
-          convert -size 256x256 xc:"#107C10" -gravity center \
-            -fill white -font Helvetica-Bold -pointsize 80 \
-            -annotate 0 "N" \
-            native/AppDir/usr/share/icons/hicolor/256x256/apps/nexel.png 2>/dev/null || \
           python3 -c "
           from PIL import Image, ImageDraw
-          img = Image.new('RGB', (256, 256), '#107C10')
+          img = Image.new('RGB', (256, 256), '#1A7A5A')
           d = ImageDraw.Draw(img)
           d.text((90, 60), 'N', fill='white')
           img.save('native/AppDir/usr/share/icons/hicolor/256x256/apps/nexel.png')
           " 2>/dev/null || \
+          convert -size 256x256 xc:"#1A7A5A" -gravity center \
+            -fill white -font Helvetica-Bold -pointsize 80 \
+            -annotate 0 "N" \
+            native/AppDir/usr/share/icons/hicolor/256x256/apps/nexel.png 2>/dev/null || \
           printf '\x89PNG\r\n\x1a\n' > native/AppDir/usr/share/icons/hicolor/256x256/apps/nexel.png
 
           export QMAKE=$Qt6_DIR/bin/qmake
@@ -287,24 +312,25 @@ jobs:
           body: |
             ## Nexel ${{ github.ref_name }}
 
+            High-performance native spreadsheet — handles millions of rows.
+
             ### Downloads
             | Platform | File |
             |----------|------|
-            | macOS (Apple Silicon - M1/M2/M3/M4) | `Nexel-${{ github.ref_name }}-macOS-arm64.dmg` |
+            | macOS (Apple Silicon) | `Nexel-${{ github.ref_name }}-macOS-arm64.dmg` |
             | macOS (Intel) | `Nexel-${{ github.ref_name }}-macOS-x64.dmg` |
             | Windows (64-bit) | `Nexel-${{ github.ref_name }}-Windows-x64.zip` |
             | Linux (64-bit) | `Nexel-${{ github.ref_name }}-Linux-x86_64.AppImage` |
 
-            ### What's New
-            - Fix macOS app launch crash (missing rpath for bundled Qt frameworks)
-            - Formula editing stays in edit mode when selecting cell ranges
-            - Auto-complete unmatched parentheses in formulas
-            - Cursor placed at end (no text selection) when editing cells
-            - Enter key in formula bar commits and moves down
-            - Sheet-level conditional formatting manager with add/edit/delete
-            - Macro recording for cell edits and style operations
-            - Delete key deletes focused chart/image/shape overlays
-            - Text rotation toolbar (angled, vertical, rotated)
+            ### What's New in v3.0.0
+            - **Performance**: Background file import with progress dialog (no UI freeze)
+            - **Performance**: Fast bulk import bypassing dependency tracking (3-5x faster)
+            - **Performance**: Inline cell reference parser replacing regex for XLSX import
+            - **Performance**: Cmd/Ctrl+Arrow navigation now instant on million-row sheets
+            - **Performance**: SpreadsheetModel fast paths for default-style cells
+            - **UI**: Redesigned app icon with chart overlay
+            - **Fix**: macOS app launch crash (Qt framework bundling)
+            - **Fix**: Proper code signing and rpath configuration
           files: |
             artifacts/**/*
           draft: false
