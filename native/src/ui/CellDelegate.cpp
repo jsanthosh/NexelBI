@@ -195,7 +195,7 @@ void CellDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option,
     QVariant bgData = index.data(Qt::BackgroundRole);
     if (bgData.isValid()) {
         QColor cellBg = bgData.value<QColor>();
-        if (cellBg.isValid() && cellBg != QColor("#FFFFFF") && cellBg != QColor(Qt::white)) {
+        if (cellBg.isValid() && cellBg.rgb() != QColor(Qt::white).rgb()) {
             bgColor = cellBg;
         }
     }

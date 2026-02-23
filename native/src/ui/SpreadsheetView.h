@@ -239,13 +239,18 @@ private:
     void destroyFreezeViews();
     void updateFreezeGeometry();
 
-    // Formula cell flash: single animation 1.0→0.0 over 2.5s, remapped in paint
+    // Formula cell flash: simple timer-driven hold + fade
     struct CellAnim {
-        QVariantAnimation* animation = nullptr;
-        double rawProgress = 0.0;  // 1.0→0.0 linearly over 2.5s
+        double progress = 1.0;    // 1.0 = full highlight, 0.0 = gone
+        int elapsedMs = 0;        // time since flash started
     };
+    static constexpr int FLASH_HOLD_MS = 250;    // hold full yellow for 0.25s
+    static constexpr int FLASH_FADE_MS = 500;     // fade out over 0.5s
+    static constexpr int FLASH_TICK_MS = 30;      // timer tick interval
     QMap<QPair<int,int>, CellAnim> m_cellAnimations;
+    QTimer* m_flashTimer = nullptr;
     void startCellFlashAnimation(int row, int col);
+    void onFlashTimerTick();
 
     // Chart data range highlight state
     struct ChartRangeHighlight {

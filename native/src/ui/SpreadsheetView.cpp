@@ -2631,66 +2631,69 @@ void SpreadsheetView::onDataChanged(const QModelIndex& topLeft, const QModelInde
 }
 
 // --- Formula cell flash animation ---
-// Uses a single QVariantAnimation (1.0→0.0 over 2500ms).
-// The raw value is remapped in cellAnimationProgress():
-//   rawProgress > 0.2  →  visual = 1.0  (hold phase, first 2000ms)
-//   rawProgress ≤ 0.2  →  visual = rawProgress/0.2  (fade-out, last 500ms)
+// Simple timer-driven approach: hold yellow for 2s, then fade out over 0.5s.
+// A single QTimer ticks every 30ms and updates all active cell flashes.
 
 double SpreadsheetView::cellAnimationProgress(int row, int col) const {
     auto it = m_cellAnimations.find({row, col});
     if (it == m_cellAnimations.end()) return 0.0;
-    double raw = it->rawProgress;
-    if (raw > 0.2) return 1.0;        // hold phase
-    return raw / 0.2;                  // fade-out phase (maps 0.2→0 to 1.0→0)
+    return it->progress;
 }
 
 void SpreadsheetView::startCellFlashAnimation(int row, int col) {
     auto key = QPair<int,int>(row, col);
 
-    // Cleanup existing animation for this cell
-    auto it = m_cellAnimations.find(key);
-    if (it != m_cellAnimations.end()) {
-        if (it->animation) {
-            it->animation->stop();
-            it->animation->deleteLater();
-        }
-        m_cellAnimations.erase(it);
-    }
-
-    // Single animation: 1.0 → 0.0 over 2500ms (linear)
-    // The remapping in cellAnimationProgress creates the hold+fade effect
-    auto* anim = new QVariantAnimation(this);
-    anim->setDuration(2500);
-    anim->setStartValue(1.0);
-    anim->setEndValue(0.0);
-    anim->setEasingCurve(QEasingCurve::Linear);
-
     CellAnim ca;
-    ca.animation = anim;
-    ca.rawProgress = 1.0;
+    ca.progress = 1.0;
+    ca.elapsedMs = 0;
     m_cellAnimations[key] = ca;
 
     // Force immediate repaint so yellow shows right away
-    if (m_model) {
-        QModelIndex idx = m_model->index(row, col);
-        update(visualRect(idx));
+    viewport()->update();
+
+    // Start the shared timer if not already running
+    if (!m_flashTimer) {
+        m_flashTimer = new QTimer(this);
+        m_flashTimer->setInterval(FLASH_TICK_MS);
+        connect(m_flashTimer, &QTimer::timeout, this, &SpreadsheetView::onFlashTimerTick);
+    }
+    if (!m_flashTimer->isActive()) {
+        m_flashTimer->start();
+    }
+}
+
+void SpreadsheetView::onFlashTimerTick() {
+    if (m_cellAnimations.isEmpty()) {
+        m_flashTimer->stop();
+        return;
     }
 
-    connect(anim, &QVariantAnimation::valueChanged, this, [this, key](const QVariant& v) {
-        auto it = m_cellAnimations.find(key);
-        if (it != m_cellAnimations.end()) {
-            it->rawProgress = v.toDouble();
-        }
-        if (m_model) {
-            QModelIndex idx = m_model->index(key.first, key.second);
-            update(visualRect(idx));
-        }
-    });
+    QVector<QPair<int,int>> toRemove;
 
-    connect(anim, &QVariantAnimation::finished, this, [this, key, anim]() {
+    for (auto it = m_cellAnimations.begin(); it != m_cellAnimations.end(); ++it) {
+        it->elapsedMs += FLASH_TICK_MS;
+
+        if (it->elapsedMs <= FLASH_HOLD_MS) {
+            it->progress = 1.0;
+        } else {
+            int fadeElapsed = it->elapsedMs - FLASH_HOLD_MS;
+            if (fadeElapsed >= FLASH_FADE_MS) {
+                it->progress = 0.0;
+                toRemove.append(it.key());
+            } else {
+                it->progress = 1.0 - static_cast<double>(fadeElapsed) / FLASH_FADE_MS;
+            }
+        }
+    }
+
+    for (const auto& key : toRemove) {
         m_cellAnimations.remove(key);
-        anim->deleteLater();
-    });
+    }
 
-    anim->start();
+    // Force full viewport repaint so delegate redraws with updated progress
+    viewport()->update();
+
+    if (m_cellAnimations.isEmpty()) {
+        m_flashTimer->stop();
+    }
 }
