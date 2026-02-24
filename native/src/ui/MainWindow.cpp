@@ -2082,7 +2082,10 @@ void MainWindow::onEditChart(ChartWidget* chart) {
 void MainWindow::onDeleteChart(ChartWidget* chart) {
     if (!chart) return;
 
-    if (chart == m_selectedChart) m_selectedChart = nullptr;
+    if (chart == m_selectedChart) {
+        m_spreadsheetView->clearChartRangeHighlight();
+        m_selectedChart = nullptr;
+    }
     removeOverlay(chart);
     m_charts.removeOne(chart);
     chart->hide();

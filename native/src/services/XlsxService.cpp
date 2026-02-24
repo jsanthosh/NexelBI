@@ -653,6 +653,15 @@ void XlsxService::parseSheet(const QByteArray& xmlData, const QStringList& share
     while (!xml.atEnd()) {
         xml.readNext();
 
+        // Parse sheet view: <sheetView showGridLines="0" .../>
+        if (xml.isStartElement() && xml.name() == u"sheetView") {
+            QStringView showGrid = xml.attributes().value("showGridLines");
+            if (showGrid == u"0") {
+                sheet->setShowGridlines(false);
+            }
+            continue;
+        }
+
         // Parse column widths: <col min="1" max="3" width="15.5" customWidth="1"/>
         if (xml.isStartElement() && xml.name() == u"col") {
             int minCol = xml.attributes().value("min").toInt() - 1;
@@ -836,15 +845,22 @@ QString XlsxService::columnIndexToLetter(int col) {
     return result;
 }
 
+static QString borderSideKey(const BorderStyle& b) {
+    if (!b.enabled) return "0";
+    return QString("1_%1_%2").arg(b.color, QString::number(b.width));
+}
+
 QString XlsxService::cellStyleKey(const CellStyle& style) {
-    return QString("%1|%2|%3|%4|%5|%6|%7|%8|%9|%10|%11|%12")
+    return QString("%1|%2|%3|%4|%5|%6|%7|%8|%9|%10|%11|%12|%13|%14|%15")
         .arg(style.fontName).arg(style.fontSize)
         .arg(style.bold).arg(style.italic).arg(style.underline).arg(style.strikethrough)
         .arg(style.foregroundColor).arg(style.backgroundColor)
         .arg(static_cast<int>(style.hAlign)).arg(static_cast<int>(style.vAlign))
         .arg(style.numberFormat)
-        .arg(style.borderTop.enabled || style.borderBottom.enabled ||
-             style.borderLeft.enabled || style.borderRight.enabled ? 1 : 0);
+        .arg(borderSideKey(style.borderLeft))
+        .arg(borderSideKey(style.borderRight))
+        .arg(borderSideKey(style.borderTop))
+        .arg(borderSideKey(style.borderBottom));
 }
 
 bool XlsxService::exportToFile(const std::vector<std::shared_ptr<Spreadsheet>>& sheets,
@@ -928,6 +944,17 @@ bool XlsxService::exportToFile(const std::vector<std::shared_ptr<Spreadsheet>>& 
         xml.writeStartElement("worksheet");
         xml.writeAttribute("xmlns", "http://schemas.openxmlformats.org/spreadsheetml/2006/main");
         xml.writeAttribute("xmlns:r", "http://schemas.openxmlformats.org/officeDocument/2006/relationships");
+
+        // Sheet views (gridline visibility)
+        xml.writeStartElement("sheetViews");
+        xml.writeStartElement("sheetView");
+        xml.writeAttribute("tabSelected", sheetIdx == 0 ? "1" : "0");
+        xml.writeAttribute("workbookViewId", "0");
+        if (!sheet->showGridlines()) {
+            xml.writeAttribute("showGridLines", "0");
+        }
+        xml.writeEndElement(); // sheetView
+        xml.writeEndElement(); // sheetViews
 
         // Column widths
         const auto& colWidths = sheet->getColumnWidths();
@@ -1335,7 +1362,8 @@ QByteArray XlsxService::generateStyles(const std::vector<std::shared_ptr<Spreads
     // Collect all unique fonts, fills, borders, numFmts from the style index map
     struct FontEntry { QString name; int size; bool bold, italic, underline, strikethrough; QString color; };
     struct FillEntry { QString bgColor; };
-    struct BorderEntry { bool hasAny; };
+    struct BorderSideEntry { bool enabled = false; QString color = "#000000"; int width = 1; };
+    struct BorderEntry { BorderSideEntry left, right, top, bottom; };
 
     // Build sorted style list by index
     std::vector<CellStyle> sortedStyles(styleIndexMap.size());
@@ -1453,31 +1481,61 @@ QByteArray XlsxService::generateStyles(const std::vector<std::shared_ptr<Spreads
     }
     xml.writeEndElement(); // fills
 
+    // Build unique borders
+    auto getBorderKey = [](const CellStyle& s) {
+        return borderSideKey(s.borderLeft) + "|" + borderSideKey(s.borderRight) + "|" +
+               borderSideKey(s.borderTop) + "|" + borderSideKey(s.borderBottom);
+    };
+
+    std::vector<BorderEntry> borderEntries;
+    std::map<QString, int> borderMap;
+    // Index 0 = no border (required default)
+    borderEntries.push_back({});
+    borderMap["0|0|0|0"] = 0;
+
+    for (const auto& s : sortedStyles) {
+        QString bk = getBorderKey(s);
+        if (!borderMap.count(bk)) {
+            borderMap[bk] = static_cast<int>(borderEntries.size());
+            BorderEntry be;
+            be.left = {s.borderLeft.enabled, s.borderLeft.color, s.borderLeft.width};
+            be.right = {s.borderRight.enabled, s.borderRight.color, s.borderRight.width};
+            be.top = {s.borderTop.enabled, s.borderTop.color, s.borderTop.width};
+            be.bottom = {s.borderBottom.enabled, s.borderBottom.color, s.borderBottom.width};
+            borderEntries.push_back(be);
+        }
+    }
+
     // borders
     xml.writeStartElement("borders");
-    xml.writeAttribute("count", "2");
-    // Default border (none)
-    xml.writeStartElement("border");
-    xml.writeEmptyElement("left");
-    xml.writeEmptyElement("right");
-    xml.writeEmptyElement("top");
-    xml.writeEmptyElement("bottom");
-    xml.writeEmptyElement("diagonal");
-    xml.writeEndElement();
-    // Thin border (all sides)
-    xml.writeStartElement("border");
-    auto writeBorderSide = [&](const QString& side) {
-        xml.writeStartElement(side);
-        xml.writeAttribute("style", "thin");
-        xml.writeStartElement("color"); xml.writeAttribute("auto", "1"); xml.writeEndElement();
-        xml.writeEndElement();
+    xml.writeAttribute("count", QString::number(borderEntries.size()));
+
+    auto writeBorderSide = [&](const QString& side, const BorderSideEntry& bs) {
+        if (bs.enabled) {
+            xml.writeStartElement(side);
+            xml.writeAttribute("style", bs.width >= 2 ? "medium" : "thin");
+            xml.writeStartElement("color");
+            if (bs.color.isEmpty() || bs.color == "#000000") {
+                xml.writeAttribute("auto", "1");
+            } else {
+                xml.writeAttribute("rgb", "FF" + bs.color.mid(1));
+            }
+            xml.writeEndElement();
+            xml.writeEndElement();
+        } else {
+            xml.writeEmptyElement(side);
+        }
     };
-    writeBorderSide("left");
-    writeBorderSide("right");
-    writeBorderSide("top");
-    writeBorderSide("bottom");
-    xml.writeEmptyElement("diagonal");
-    xml.writeEndElement();
+
+    for (const auto& be : borderEntries) {
+        xml.writeStartElement("border");
+        writeBorderSide("left", be.left);
+        writeBorderSide("right", be.right);
+        writeBorderSide("top", be.top);
+        writeBorderSide("bottom", be.bottom);
+        xml.writeEmptyElement("diagonal");
+        xml.writeEndElement();
+    }
     xml.writeEndElement(); // borders
 
     // cellXfs
@@ -1496,9 +1554,10 @@ QByteArray XlsxService::generateStyles(const std::vector<std::shared_ptr<Spreads
         }
         xml.writeAttribute("fillId", QString::number(fillId));
         // Border
-        bool hasBorder = s.borderTop.enabled || s.borderBottom.enabled ||
-                         s.borderLeft.enabled || s.borderRight.enabled;
-        xml.writeAttribute("borderId", hasBorder ? "1" : "0");
+        QString bk = getBorderKey(s);
+        int borderId = borderMap.count(bk) ? borderMap[bk] : 0;
+        bool hasBorder = borderId != 0;
+        xml.writeAttribute("borderId", QString::number(borderId));
         // NumFmt
         int numFmtId = 0;
         if (numFmtMap.count(s.numberFormat)) {
