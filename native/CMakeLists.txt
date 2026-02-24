@@ -50,6 +50,7 @@ set(CORE_SOURCES
     src/core/Spreadsheet.h
     src/core/FormulaEngine.cpp
     src/core/FormulaEngine.h
+    src/core/FormulaMetadata.h
     src/core/CellRange.cpp
     src/core/CellRange.h
     src/core/ConditionalFormatting.cpp

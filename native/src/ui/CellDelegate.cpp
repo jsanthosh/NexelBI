@@ -1,35 +1,36 @@
 #include "CellDelegate.h"
 #include "SpreadsheetView.h"
+#include "../core/FormulaMetadata.h"
 #include <QLineEdit>
 #include <QPainter>
 #include <QPainterPath>
 #include <QStyleOptionViewItem>
 #include <QApplication>
-#include <QCompleter>
-#include <QStringListModel>
 #include <QAbstractItemView>
-#include <QListView>
+#include <QListWidget>
 #include <QKeyEvent>
 #include <QTableView>
 #include <QTimer>
+#include <QLabel>
+#include <QVBoxLayout>
+#include <QFrame>
+#include <QScrollBar>
 
-// All supported formula function names
-static const QStringList s_formulaNames = {
-    "SUM", "AVERAGE", "COUNT", "COUNTA", "MIN", "MAX",
-    "IF", "IFERROR", "AND", "OR", "NOT",
-    "CONCAT", "CONCATENATE", "LEN", "UPPER", "LOWER", "TRIM",
-    "LEFT", "RIGHT", "MID", "FIND", "SUBSTITUTE", "TEXT",
-    "ROUND", "ABS", "SQRT", "POWER", "MOD", "INT", "CEILING", "FLOOR",
-    "COUNTIF", "SUMIF", "AVERAGEIF", "COUNTBLANK", "SUMPRODUCT",
-    "MEDIAN", "MODE", "STDEV", "VAR", "LARGE", "SMALL", "RANK", "PERCENTILE",
-    "NOW", "TODAY", "YEAR", "MONTH", "DAY",
-    "DATE", "HOUR", "MINUTE", "SECOND", "DATEDIF", "NETWORKDAYS", "WEEKDAY",
-    "EDATE", "EOMONTH", "DATEVALUE",
-    "VLOOKUP", "HLOOKUP", "XLOOKUP", "INDEX", "MATCH",
-    "ROUNDUP", "ROUNDDOWN", "LOG", "LN", "EXP", "RAND", "RANDBETWEEN",
-    "PROPER", "SEARCH", "REPT", "EXACT", "VALUE",
-    "ISBLANK", "ISERROR", "ISNUMBER", "ISTEXT", "CHOOSE", "SWITCH",
-};
+// Extract the token currently being typed (after last delimiter)
+static QString extractCurrentToken(const QString& text) {
+    if (!text.startsWith("=") || text.length() <= 1) return {};
+    QString afterEq = text.mid(1);
+    int lastDelim = -1;
+    for (int i = afterEq.length() - 1; i >= 0; --i) {
+        QChar ch = afterEq[i];
+        if (ch == '(' || ch == ')' || ch == ',' || ch == '+' || ch == '-' ||
+            ch == '*' || ch == '/' || ch == ':' || ch == ' ') {
+            lastDelim = i;
+            break;
+        }
+    }
+    return afterEq.mid(lastDelim + 1);
+}
 
 CellDelegate::CellDelegate(QObject* parent)
     : QStyledItemDelegate(parent) {
@@ -44,12 +45,51 @@ bool CellDelegate::eventFilter(QObject* object, QEvent* event) {
 
     if (event->type() == QEvent::KeyPress) {
         QKeyEvent* keyEvent = static_cast<QKeyEvent*>(event);
+        QLineEdit* editor = qobject_cast<QLineEdit*>(object);
+
+        // Handle popup keyboard navigation
+        if (editor) {
+            auto* popup = qobject_cast<QListWidget*>(
+                editor->property("_formulaPopup").value<QObject*>());
+            if (popup && popup->isVisible()) {
+                if (keyEvent->key() == Qt::Key_Down) {
+                    int next = popup->currentRow() + 1;
+                    if (next < popup->count()) popup->setCurrentRow(next);
+                    return true;
+                }
+                if (keyEvent->key() == Qt::Key_Up) {
+                    int prev = popup->currentRow() - 1;
+                    if (prev >= 0) popup->setCurrentRow(prev);
+                    return true;
+                }
+                if (keyEvent->key() == Qt::Key_Return || keyEvent->key() == Qt::Key_Enter ||
+                    keyEvent->key() == Qt::Key_Tab) {
+                    auto* item = popup->currentItem();
+                    if (item) {
+                        QString funcName = item->data(Qt::UserRole).toString();
+                        popup->hide();
+                        QString text = editor->text();
+                        QString token = extractCurrentToken(text);
+                        if (!token.isEmpty()) {
+                            int tokenStart = text.length() - token.length();
+                            editor->setText(text.left(tokenStart) + funcName + "(");
+                            editor->setCursorPosition(editor->text().length());
+                        }
+                    }
+                    return true;
+                }
+                if (keyEvent->key() == Qt::Key_Escape) {
+                    popup->hide();
+                    return true;
+                }
+            }
+        }
+
         // Arrow keys during editing: commit and move (like Excel)
         // But NOT during formula edit mode — arrows navigate in the formula text
         if (!m_formulaEditMode &&
             (keyEvent->key() == Qt::Key_Up || keyEvent->key() == Qt::Key_Down ||
              keyEvent->key() == Qt::Key_Left || keyEvent->key() == Qt::Key_Right)) {
-            QLineEdit* editor = qobject_cast<QLineEdit*>(object);
             if (editor) {
                 // Left/Right: only commit if cursor is at boundary
                 if (keyEvent->key() == Qt::Key_Left && editor->cursorPosition() > 0)
@@ -94,62 +134,157 @@ QWidget* CellDelegate::createEditor(QWidget* parent, const QStyleOptionViewItem&
         "QLineEdit { background: white; padding: 1px 2px; "
         "border: 2px solid #107C10; selection-background-color: #0078D4; }");
 
-    // Formula autocomplete
-    auto* completer = new QCompleter(s_formulaNames, editor);
-    completer->setWidget(editor);
-    completer->setCaseSensitivity(Qt::CaseInsensitive);
-    completer->setCompletionMode(QCompleter::PopupCompletion);
-    completer->setFilterMode(Qt::MatchContains);
-    completer->popup()->setStyleSheet(
-        "QListView { background: white; border: 1px solid #C8C8C8; font-size: 12px; }"
-        "QListView::item { padding: 3px 8px; }"
-        "QListView::item:selected { background: #E8F0FE; color: #333; }"
+    // --- Custom formula autocomplete popup ---
+    auto* popup = new QListWidget(parent->window());
+    popup->setWindowFlags(Qt::Popup | Qt::FramelessWindowHint);
+    popup->setAttribute(Qt::WA_ShowWithoutActivating);
+    popup->setFocusPolicy(Qt::NoFocus);
+    popup->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    popup->setStyleSheet(
+        "QListWidget { background: white; border: 1px solid #C8C8C8; font-size: 12px; outline: none; }"
+        "QListWidget::item { padding: 4px 8px; border: none; }"
+        "QListWidget::item:selected { background: #E8F0FE; }"
     );
+    popup->setIconSize(QSize(0, 0));
+    popup->hide();
 
-    // When a formula is selected from the completer, append parentheses
-    connect(completer, QOverload<const QString&>::of(&QCompleter::activated),
-            editor, [editor](const QString& funcName) {
-        // The completer replaces text after '=', so we need to set it with parens
-        QString text = editor->text();
-        // Find where the function name starts (after '=' and any existing content)
-        int eqPos = text.lastIndexOf('=');
-        if (eqPos >= 0) {
-            editor->setText(text.left(eqPos + 1) + funcName + "()");
-            editor->setCursorPosition(editor->text().length() - 1); // Position between parens
+    // --- Parameter hint tooltip ---
+    auto* paramHint = new QLabel(parent->window());
+    paramHint->setWindowFlags(Qt::ToolTip | Qt::FramelessWindowHint);
+    paramHint->setAttribute(Qt::WA_ShowWithoutActivating);
+    paramHint->setStyleSheet(
+        "QLabel { background: #FFF8DC; border: 1px solid #E0D8B0; padding: 4px 8px; "
+        "font-size: 12px; color: #333; border-radius: 3px; }");
+    paramHint->setTextFormat(Qt::RichText);
+    paramHint->hide();
+
+    // Populate popup items from registry
+    auto populatePopup = [popup](const QString& prefix) {
+        popup->clear();
+        const auto& reg = formulaRegistry();
+        QString upper = prefix.toUpper();
+        for (auto it = reg.begin(); it != reg.end(); ++it) {
+            if (it->name.contains(upper, Qt::CaseInsensitive)) {
+                auto* item = new QListWidgetItem(popup);
+                // Store function name in UserRole for retrieval
+                item->setData(Qt::UserRole, it->name);
+                // Rich text display: bold name + gray description
+                QString display = it->name;
+                // Pad to align descriptions
+                while (display.length() < 14) display += ' ';
+                item->setText(display + it->description);
+
+                // Custom font: name bold, rest normal
+                QFont f = popup->font();
+                f.setPointSize(11);
+                item->setFont(f);
+            }
         }
-    });
+        return popup->count() > 0;
+    };
 
-    // Show completer only when typing after '='
-    connect(editor, &QLineEdit::textChanged, this, [this, editor, completer](const QString& text) {
+    // Insert selected function into editor
+    auto insertFunction = [editor, popup, paramHint](const QString& funcName) {
+        popup->hide();
+        QString text = editor->text();
+        // Find the start of the token we're replacing
+        QString token = extractCurrentToken(text);
+        if (!token.isEmpty()) {
+            int tokenStart = text.length() - token.length();
+            editor->setText(text.left(tokenStart) + funcName + "(");
+            editor->setCursorPosition(editor->text().length());
+        }
+        editor->setFocus();
+    };
+
+    // When item clicked in popup
+    QObject::connect(popup, &QListWidget::itemClicked, editor,
+        [insertFunction](QListWidgetItem* item) {
+            insertFunction(item->data(Qt::UserRole).toString());
+        });
+
+    // Handle keyboard in editor for popup navigation
+    editor->installEventFilter(const_cast<CellDelegate*>(this));
+
+    // Store popup and paramHint on editor for access in eventFilter
+    editor->setProperty("_formulaPopup", QVariant::fromValue(static_cast<QObject*>(popup)));
+    editor->setProperty("_paramHint", QVariant::fromValue(static_cast<QObject*>(paramHint)));
+
+    // Show popup / param hint on text change
+    QObject::connect(editor, &QLineEdit::textChanged, editor,
+        [this, editor, popup, paramHint, populatePopup, insertFunction](const QString& text) {
         emit formulaEditModeChanged(text.startsWith("="));
 
         if (text.startsWith("=") && text.length() > 1) {
-            // Extract the token being typed (after last operator/paren/comma)
-            QString afterEq = text.mid(1);
-            int lastDelim = -1;
-            for (int i = afterEq.length() - 1; i >= 0; --i) {
-                QChar ch = afterEq[i];
-                if (ch == '(' || ch == ')' || ch == ',' || ch == '+' || ch == '-' ||
-                    ch == '*' || ch == '/' || ch == ':' || ch == ' ') {
-                    lastDelim = i;
-                    break;
-                }
-            }
-            QString prefix = afterEq.mid(lastDelim + 1);
-            if (!prefix.isEmpty() && prefix[0].isLetter()) {
-                completer->setCompletionPrefix(prefix);
-                if (completer->completionCount() > 0) {
-                    completer->complete();
+            QString token = extractCurrentToken(text);
+
+            // Show autocomplete if typing a function name token
+            if (!token.isEmpty() && token[0].isLetter()) {
+                if (populatePopup(token)) {
+                    // Position below the editor
+                    QPoint pos = editor->mapToGlobal(QPoint(0, editor->height()));
+                    popup->setFixedWidth(qMax(380, editor->width()));
+                    int visibleItems = qMin(popup->count(), 8);
+                    popup->setFixedHeight(visibleItems * 26 + 4);
+                    popup->move(pos);
+                    popup->show();
+                    popup->setCurrentRow(0);
                 } else {
-                    completer->popup()->hide();
+                    popup->hide();
                 }
             } else {
-                completer->popup()->hide();
+                popup->hide();
+            }
+
+            // Show param hint if inside a function call
+            int cursorPos = editor->cursorPosition();
+            FormulaContext ctx = findFormulaContext(text, cursorPos);
+            const auto& reg = formulaRegistry();
+            if (ctx.paramIndex >= 0 && reg.contains(ctx.funcName)) {
+                const auto& info = reg[ctx.funcName];
+                paramHint->setText(buildParamHintHtml(info, ctx.paramIndex));
+                paramHint->adjustSize();
+                QPoint hintPos = editor->mapToGlobal(QPoint(0, editor->height() + 2));
+                // If popup is visible, place hint below it
+                if (popup->isVisible()) {
+                    hintPos.setY(popup->mapToGlobal(QPoint(0, popup->height())).y() + 2);
+                }
+                paramHint->move(hintPos);
+                paramHint->show();
+            } else {
+                paramHint->hide();
             }
         } else {
-            completer->popup()->hide();
+            popup->hide();
+            paramHint->hide();
         }
     });
+
+    // Also update param hint on cursor position change
+    QObject::connect(editor, &QLineEdit::cursorPositionChanged, editor,
+        [editor, paramHint, popup](int, int newPos) {
+        QString text = editor->text();
+        if (!text.startsWith("=")) { paramHint->hide(); return; }
+        FormulaContext ctx = findFormulaContext(text, newPos);
+        const auto& reg = formulaRegistry();
+        if (ctx.paramIndex >= 0 && reg.contains(ctx.funcName)) {
+            const auto& info = reg[ctx.funcName];
+            paramHint->setText(buildParamHintHtml(info, ctx.paramIndex));
+            paramHint->adjustSize();
+            QPoint hintPos = editor->mapToGlobal(QPoint(0, editor->height() + 2));
+            if (popup->isVisible()) {
+                hintPos.setY(popup->mapToGlobal(QPoint(0, popup->height())).y() + 2);
+            }
+            paramHint->move(hintPos);
+            paramHint->show();
+        } else {
+            paramHint->hide();
+        }
+    });
+
+    // Clean up on editor destruction
+    QObject::connect(editor, &QObject::destroyed, popup, &QObject::deleteLater);
+    QObject::connect(editor, &QObject::destroyed, paramHint, &QObject::deleteLater);
 
     return editor;
 }

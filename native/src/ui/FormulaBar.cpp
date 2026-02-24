@@ -1,10 +1,12 @@
 #include "FormulaBar.h"
+#include "../core/FormulaMetadata.h"
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QKeyEvent>
 
 FormulaBar::FormulaBar(QWidget* parent)
     : QWidget(parent) {
-    
+
     QHBoxLayout* layout = new QHBoxLayout(this);
     layout->setContentsMargins(5, 5, 5, 5);
 
@@ -35,6 +37,8 @@ FormulaBar::FormulaBar(QWidget* parent)
         "   border-radius: 3px;"
         "}"
     );
+
+    setupAutocomplete();
 }
 
 void FormulaBar::setCellAddress(const QString& address) {
@@ -76,4 +80,167 @@ void FormulaBar::replaceLastInsertedText(const QString& newText) {
         m_formulaEdit->insert(newText);
         m_lastInsertLen = newText.length();
     }
+}
+
+void FormulaBar::setupAutocomplete() {
+    m_popup = new QListWidget(window());
+    m_popup->setWindowFlags(Qt::Popup | Qt::FramelessWindowHint);
+    m_popup->setAttribute(Qt::WA_ShowWithoutActivating);
+    m_popup->setFocusPolicy(Qt::NoFocus);
+    m_popup->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_popup->setStyleSheet(
+        "QListWidget { background: white; border: 1px solid #C8C8C8; font-size: 12px; outline: none; }"
+        "QListWidget::item { padding: 4px 8px; border: none; }"
+        "QListWidget::item:selected { background: #E8F0FE; }"
+    );
+    m_popup->hide();
+
+    m_paramHint = new QLabel(window());
+    m_paramHint->setWindowFlags(Qt::ToolTip | Qt::FramelessWindowHint);
+    m_paramHint->setAttribute(Qt::WA_ShowWithoutActivating);
+    m_paramHint->setStyleSheet(
+        "QLabel { background: #FFF8DC; border: 1px solid #E0D8B0; padding: 4px 8px; "
+        "font-size: 12px; color: #333; border-radius: 3px; }");
+    m_paramHint->setTextFormat(Qt::RichText);
+    m_paramHint->hide();
+
+    connect(m_popup, &QListWidget::itemClicked, this, [this](QListWidgetItem* item) {
+        insertFunction(item->data(Qt::UserRole).toString());
+    });
+
+    connect(m_formulaEdit, &QLineEdit::textEdited, this, [this]() {
+        updatePopup();
+        updateParamHint();
+    });
+
+    connect(m_formulaEdit, &QLineEdit::cursorPositionChanged, this, [this]() {
+        updateParamHint();
+    });
+
+    // Install event filter to handle keyboard in formula edit for popup navigation
+    m_formulaEdit->installEventFilter(this);
+}
+
+bool FormulaBar::eventFilter(QObject* obj, QEvent* event) {
+    if (obj == m_formulaEdit && event->type() == QEvent::KeyPress && m_popup && m_popup->isVisible()) {
+        auto* ke = static_cast<QKeyEvent*>(event);
+        if (ke->key() == Qt::Key_Down) {
+            int next = m_popup->currentRow() + 1;
+            if (next < m_popup->count()) m_popup->setCurrentRow(next);
+            return true;
+        }
+        if (ke->key() == Qt::Key_Up) {
+            int prev = m_popup->currentRow() - 1;
+            if (prev >= 0) m_popup->setCurrentRow(prev);
+            return true;
+        }
+        if (ke->key() == Qt::Key_Return || ke->key() == Qt::Key_Enter || ke->key() == Qt::Key_Tab) {
+            auto* item = m_popup->currentItem();
+            if (item) insertFunction(item->data(Qt::UserRole).toString());
+            return true;
+        }
+        if (ke->key() == Qt::Key_Escape) {
+            m_popup->hide();
+            return true;
+        }
+    }
+    return QWidget::eventFilter(obj, event);
+}
+
+void FormulaBar::updatePopup() {
+    QString text = m_formulaEdit->text();
+    if (!text.startsWith("=") || text.length() <= 1) {
+        m_popup->hide();
+        return;
+    }
+
+    // Extract current token
+    QString afterEq = text.mid(1);
+    int lastDelim = -1;
+    for (int i = afterEq.length() - 1; i >= 0; --i) {
+        QChar ch = afterEq[i];
+        if (ch == '(' || ch == ')' || ch == ',' || ch == '+' || ch == '-' ||
+            ch == '*' || ch == '/' || ch == ':' || ch == ' ') {
+            lastDelim = i;
+            break;
+        }
+    }
+    QString token = afterEq.mid(lastDelim + 1);
+    if (token.isEmpty() || !token[0].isLetter()) {
+        m_popup->hide();
+        return;
+    }
+
+    m_popup->clear();
+    const auto& reg = formulaRegistry();
+    for (auto it = reg.begin(); it != reg.end(); ++it) {
+        if (it->name.contains(token, Qt::CaseInsensitive)) {
+            auto* item = new QListWidgetItem(m_popup);
+            item->setData(Qt::UserRole, it->name);
+            QString display = it->name;
+            while (display.length() < 14) display += ' ';
+            item->setText(display + it->description);
+            QFont f = m_popup->font();
+            f.setPointSize(11);
+            item->setFont(f);
+        }
+    }
+
+    if (m_popup->count() > 0) {
+        QPoint pos = m_formulaEdit->mapToGlobal(QPoint(0, m_formulaEdit->height()));
+        m_popup->setFixedWidth(qMax(420, m_formulaEdit->width()));
+        int visibleItems = qMin(m_popup->count(), 8);
+        m_popup->setFixedHeight(visibleItems * 26 + 4);
+        m_popup->move(pos);
+        m_popup->show();
+        m_popup->setCurrentRow(0);
+    } else {
+        m_popup->hide();
+    }
+}
+
+void FormulaBar::updateParamHint() {
+    QString text = m_formulaEdit->text();
+    if (!text.startsWith("=")) {
+        m_paramHint->hide();
+        return;
+    }
+
+    int cursorPos = m_formulaEdit->cursorPosition();
+    FormulaContext ctx = findFormulaContext(text, cursorPos);
+    const auto& reg = formulaRegistry();
+
+    if (ctx.paramIndex >= 0 && reg.contains(ctx.funcName)) {
+        const auto& info = reg[ctx.funcName];
+        m_paramHint->setText(buildParamHintHtml(info, ctx.paramIndex));
+        m_paramHint->adjustSize();
+        QPoint hintPos = m_formulaEdit->mapToGlobal(QPoint(0, m_formulaEdit->height() + 2));
+        if (m_popup && m_popup->isVisible()) {
+            hintPos.setY(m_popup->mapToGlobal(QPoint(0, m_popup->height())).y() + 2);
+        }
+        m_paramHint->move(hintPos);
+        m_paramHint->show();
+    } else {
+        m_paramHint->hide();
+    }
+}
+
+void FormulaBar::insertFunction(const QString& funcName) {
+    m_popup->hide();
+    QString text = m_formulaEdit->text();
+    // Find current token to replace
+    QString afterEq = text.mid(1);
+    int lastDelim = -1;
+    for (int i = afterEq.length() - 1; i >= 0; --i) {
+        QChar ch = afterEq[i];
+        if (ch == '(' || ch == ')' || ch == ',' || ch == '+' || ch == '-' ||
+            ch == '*' || ch == '/' || ch == ':' || ch == ' ') {
+            lastDelim = i;
+            break;
+        }
+    }
+    int tokenStart = 1 + lastDelim + 1; // position in full text
+    m_formulaEdit->setText(text.left(tokenStart) + funcName + "(");
+    m_formulaEdit->setCursorPosition(m_formulaEdit->text().length());
+    m_formulaEdit->setFocus();
 }

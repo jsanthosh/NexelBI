@@ -4,6 +4,7 @@
 #include <QWidget>
 #include <QLineEdit>
 #include <QLabel>
+#include <QListWidget>
 
 class FormulaBar : public QWidget {
     Q_OBJECT
@@ -24,6 +25,9 @@ signals:
     void formulaEditModeChanged(bool active);
     void returnPressed();
 
+protected:
+    bool eventFilter(QObject* obj, QEvent* event) override;
+
 private slots:
     void onTextChanged(const QString& text);
     void onTextEdited(const QString& text);
@@ -31,8 +35,15 @@ private slots:
 private:
     QLabel* m_cellAddressLabel;
     QLineEdit* m_formulaEdit;
+    QListWidget* m_popup = nullptr;
+    QLabel* m_paramHint = nullptr;
     int m_lastInsertPos = -1;
     int m_lastInsertLen = 0;
+
+    void setupAutocomplete();
+    void updatePopup();
+    void updateParamHint();
+    void insertFunction(const QString& funcName);
 };
 
 #endif // FORMULABAR_H
