@@ -14,10 +14,14 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QWidgetAction>
+#include <QTimer>
 #include <QFrame>
 #include <QPushButton>
 #include <functional>
 #include "../core/TableStyle.h"
+#include "../core/NumberFormat.h"
+#include <QDate>
+#include <QDateTime>
 
 // ===== Color Palette Popup =====
 // Custom paint widget for a single color swatch — crisp, no stylesheet blur
@@ -756,70 +760,52 @@ void Toolbar::createActions() {
     };
 
     QFont boldFont("Arial", 12, QFont::Bold);
-    makeFmtBtn("B", boldFont, "Bold (Ctrl+B)", QKeySequence::Bold, [this]() { emit bold(); });
+    m_boldBtn = makeFmtBtn("B", boldFont, "Bold (Ctrl+B)", QKeySequence::Bold, [this]() { emit bold(); });
 
     QFont italicFont("Arial", 12);
     italicFont.setItalic(true);
-    makeFmtBtn("I", italicFont, "Italic (Ctrl+I)", QKeySequence::Italic, [this]() { emit italic(); });
+    m_italicBtn = makeFmtBtn("I", italicFont, "Italic (Ctrl+I)", QKeySequence::Italic, [this]() { emit italic(); });
 
     QFont underlineFont("Arial", 12);
     underlineFont.setUnderline(true);
-    makeFmtBtn("U", underlineFont, "Underline (Ctrl+U)", QKeySequence::Underline, [this]() { emit underline(); });
+    m_underlineBtn = makeFmtBtn("U", underlineFont, "Underline (Ctrl+U)", QKeySequence::Underline, [this]() { emit underline(); });
 
     QFont strikeFont("Arial", 12);
     strikeFont.setStrikeOut(true);
-    makeFmtBtn("S", strikeFont, "Strikethrough", QKeySequence(), [this]() { emit strikethrough(); });
+    m_strikethroughBtn = makeFmtBtn("S", strikeFont, "Strikethrough", QKeySequence(), [this]() { emit strikethrough(); });
 
     addSeparator();
 
     // ===== Colors =====
-    QToolButton* fgColorBtn = new QToolButton(this);
-    fgColorBtn->setText("A");
-    fgColorBtn->setFont(QFont("Arial", 12, QFont::Bold));
-    fgColorBtn->setToolTip("Font Color");
-    fgColorBtn->setFixedSize(28, 28);
-    fgColorBtn->setStyleSheet(
+    m_fgColorBtn = new QToolButton(this);
+    m_fgColorBtn->setText("A");
+    m_fgColorBtn->setFont(QFont("Arial", 12, QFont::Bold));
+    m_fgColorBtn->setToolTip("Font Color");
+    m_fgColorBtn->setFixedSize(28, 28);
+    m_fgColorBtn->setStyleSheet(
         "QToolButton { color: #C00000; font-weight: bold; border-bottom: 3px solid #C00000; border-radius: 4px; }");
-    addWidget(fgColorBtn);
-    connect(fgColorBtn, &QToolButton::clicked, this, [this, fgColorBtn]() {
+    addWidget(m_fgColorBtn);
+    connect(m_fgColorBtn, &QToolButton::clicked, this, [this]() {
         QColor color = showColorPalette(this, m_lastFgColor, "Font Color");
         if (color.isValid()) {
             m_lastFgColor = color;
-            fgColorBtn->setStyleSheet(
+            m_fgColorBtn->setStyleSheet(
                 QString("QToolButton { color: %1; font-weight: bold; border-bottom: 3px solid %1; border-radius: 4px; }")
                     .arg(color.name()));
             emit foregroundColorChanged(color);
         }
     });
 
-    QToolButton* bgColorBtn = new QToolButton(this);
-    bgColorBtn->setToolTip("Fill Color");
-    bgColorBtn->setFixedSize(28, 28);
-    bgColorBtn->setStyleSheet(
-        "QToolButton { background-color: #FFFF00; border: 1px solid #D0D5DD; border-bottom: 3px solid #FFFF00; border-radius: 4px; }");
-    addWidget(bgColorBtn);
-    // Paint a bucket icon on it
-    {
-        QPixmap pix(18, 18);
-        pix.fill(Qt::transparent);
-        QPainter p(&pix);
-        p.setRenderHint(QPainter::Antialiasing, true);
-        p.setPen(QPen(QColor("#555"), 1.0));
-        p.setBrush(QColor("#FFFF00"));
-        p.drawRoundedRect(3, 6, 12, 9, 2, 2);
-        p.setPen(QPen(QColor("#888"), 0.8));
-        p.drawLine(5, 6, 5, 3);
-        p.drawLine(5, 3, 12, 3);
-        p.end();
-        bgColorBtn->setIcon(QIcon(pix));
-    }
-    connect(bgColorBtn, &QToolButton::clicked, this, [this, bgColorBtn]() {
+    m_bgColorBtn = new QToolButton(this);
+    m_bgColorBtn->setToolTip("Fill Color");
+    m_bgColorBtn->setFixedSize(28, 28);
+    addWidget(m_bgColorBtn);
+    updateBgColorIcon();
+    connect(m_bgColorBtn, &QToolButton::clicked, this, [this]() {
         QColor color = showColorPalette(this, m_lastBgColor, "Fill Color");
         if (color.isValid()) {
             m_lastBgColor = color;
-            bgColorBtn->setStyleSheet(
-                QString("QToolButton { background-color: %1; border: 1px solid #D0D5DD; border-bottom: 3px solid %1; border-radius: 4px; }")
-                    .arg(color.name()));
+            updateBgColorIcon();
             emit backgroundColorChanged(color);
         }
     });
@@ -856,9 +842,10 @@ static const char* TOOLBAR_STYLE_ROW2 = R"(
         border-color: #4A90D9;
     }
     QToolButton::menu-indicator {
-        width: 0px;
-        height: 0px;
-        image: none;
+        subcontrol-position: right center;
+        subcontrol-origin: padding;
+        width: 10px;
+        height: 10px;
     }
     QToolBar::separator {
         width: 1px;
@@ -988,7 +975,6 @@ QToolBar* Toolbar::createSecondaryToolbar(QWidget* parent) {
     rotateBtn->setStyleSheet(
         "QToolButton { background: transparent; border: 1px solid transparent; border-radius: 4px; padding: 2px 4px; }"
         "QToolButton:hover { background-color: #E8ECF0; border-color: #D0D5DD; }"
-        "QToolButton::menu-indicator { image: none; width: 0; }"
     );
     // Create rotation icon: tilted "ab" text
     rotateBtn->setIcon(createIcon(16, [](QPainter& p, int) {
@@ -1036,7 +1022,6 @@ QToolBar* Toolbar::createSecondaryToolbar(QWidget* parent) {
         "QToolButton:hover { background-color: #E8ECF0; border-color: #D0D5DD; }"
         "QToolButton::menu-button { width: 14px; border-left: 1px solid #D0D5DD; }"
         "QToolButton::menu-button:hover { background-color: #D8DCE0; }"
-        "QToolButton::menu-arrow { image: none; }"
     );
 
     QMenu* borderMenu = new QMenu(borderBtn);
@@ -1047,23 +1032,153 @@ QToolBar* Toolbar::createSecondaryToolbar(QWidget* parent) {
         "QMenu::icon { margin-right: 8px; }"
         "QMenu::separator { height: 1px; background: #E0E3E8; margin: 3px 8px; }"
     );
-    borderMenu->addAction(createBorderMenuIcon("bottom"), "Bottom Border", this, [this]() { emit borderStyleSelected("bottom"); });
-    borderMenu->addAction(createBorderMenuIcon("top"), "Top Border", this, [this]() { emit borderStyleSelected("top"); });
-    borderMenu->addAction(createBorderMenuIcon("left"), "Left Border", this, [this]() { emit borderStyleSelected("left"); });
-    borderMenu->addAction(createBorderMenuIcon("right"), "Right Border", this, [this]() { emit borderStyleSelected("right"); });
+
+    auto emitBorder = [this](const QString& type) {
+        emit borderStyleSelected(type, m_lastBorderColor, m_lastBorderWidth, m_lastBorderPenStyle);
+    };
+
+    borderMenu->addAction(createBorderMenuIcon("bottom"), "Bottom Border", this, [emitBorder]() { emitBorder("bottom"); });
+    borderMenu->addAction(createBorderMenuIcon("top"), "Top Border", this, [emitBorder]() { emitBorder("top"); });
+    borderMenu->addAction(createBorderMenuIcon("left"), "Left Border", this, [emitBorder]() { emitBorder("left"); });
+    borderMenu->addAction(createBorderMenuIcon("right"), "Right Border", this, [emitBorder]() { emitBorder("right"); });
     borderMenu->addSeparator();
-    borderMenu->addAction(createBorderMenuIcon("all"), "All Borders", this, [this]() { emit borderStyleSelected("all"); });
-    borderMenu->addAction(createBorderMenuIcon("outside"), "Outside Borders", this, [this]() { emit borderStyleSelected("outside"); });
-    borderMenu->addAction(createBorderMenuIcon("thick_outside"), "Thick Box Border", this, [this]() { emit borderStyleSelected("thick_outside"); });
+    borderMenu->addAction(createBorderMenuIcon("all"), "All Borders", this, [emitBorder]() { emitBorder("all"); });
+    borderMenu->addAction(createBorderMenuIcon("outside"), "Outside Borders", this, [emitBorder]() { emitBorder("outside"); });
+    borderMenu->addAction(createBorderMenuIcon("thick_outside"), "Thick Box Border", this, [emitBorder]() { emitBorder("thick_outside"); });
     borderMenu->addSeparator();
-    borderMenu->addAction(createBorderMenuIcon("inside_h"), "Inside Horizontal", this, [this]() { emit borderStyleSelected("inside_h"); });
-    borderMenu->addAction(createBorderMenuIcon("inside_v"), "Inside Vertical", this, [this]() { emit borderStyleSelected("inside_v"); });
-    borderMenu->addAction(createBorderMenuIcon("inside"), "Inside Borders", this, [this]() { emit borderStyleSelected("inside"); });
+    borderMenu->addAction(createBorderMenuIcon("inside_h"), "Inside Horizontal", this, [emitBorder]() { emitBorder("inside_h"); });
+    borderMenu->addAction(createBorderMenuIcon("inside_v"), "Inside Vertical", this, [emitBorder]() { emitBorder("inside_v"); });
+    borderMenu->addAction(createBorderMenuIcon("inside"), "Inside Borders", this, [emitBorder]() { emitBorder("inside"); });
     borderMenu->addSeparator();
-    borderMenu->addAction(createBorderMenuIcon("none"), "No Border", this, [this]() { emit borderStyleSelected("none"); });
+    borderMenu->addAction(createBorderMenuIcon("none"), "No Border", this, [emitBorder]() { emitBorder("none"); });
+
+    borderMenu->addSeparator();
+
+    // Helper: re-open border menu after Line Style / Line Color changes
+    auto reopenBorderMenu = [borderMenu, borderBtn]() {
+        QTimer::singleShot(0, borderMenu, [borderMenu, borderBtn]() {
+            borderMenu->popup(borderBtn->mapToGlobal(QPoint(0, borderBtn->height())));
+        });
+    };
+
+    // ===== Line Style submenu =====
+    auto makeLineStyleIcon = [](int width, int style) {
+        return createIcon(16, [width, style](QPainter& p, int) {
+            QPen pen(QColor("#333"), width * 1.2);
+            if (style == 1) pen.setStyle(Qt::DashLine);
+            else if (style == 2) pen.setStyle(Qt::DotLine);
+            p.setPen(pen);
+            p.drawLine(1, 8, 15, 8);
+        });
+    };
+
+    QMenu* lineStyleMenu = borderMenu->addMenu(
+        makeLineStyleIcon(m_lastBorderWidth, m_lastBorderPenStyle),
+        "Line Style: Thin");
+    lineStyleMenu->setStyleSheet(borderMenu->styleSheet());
+
+    // Collect all line style actions for exclusive checking
+    QList<QAction*> lineActions;
+
+    auto* thinAction = lineStyleMenu->addAction(makeLineStyleIcon(1, 0), "Thin");
+    lineActions << thinAction;
+    auto* mediumAction = lineStyleMenu->addAction(makeLineStyleIcon(2, 0), "Medium");
+    lineActions << mediumAction;
+    auto* thickAction = lineStyleMenu->addAction(makeLineStyleIcon(3, 0), "Thick");
+    lineActions << thickAction;
+
+    lineStyleMenu->addSeparator();
+
+    auto* thinDashedAction = lineStyleMenu->addAction(makeLineStyleIcon(1, 1), "Thin Dashed");
+    lineActions << thinDashedAction;
+    auto* mediumDashedAction = lineStyleMenu->addAction(makeLineStyleIcon(2, 1), "Medium Dashed");
+    lineActions << mediumDashedAction;
+
+    lineStyleMenu->addSeparator();
+
+    auto* thinDottedAction = lineStyleMenu->addAction(makeLineStyleIcon(1, 2), "Dotted");
+    lineActions << thinDottedAction;
+
+    for (auto* a : lineActions) a->setCheckable(true);
+    thinAction->setChecked(true);
+
+    auto uncheckAllLineStyles = [lineActions](QAction* except) {
+        for (auto* a : lineActions) a->setChecked(a == except);
+    };
+
+    auto updateLineStyleLabel = [lineStyleMenu, makeLineStyleIcon](int width, int penStyle, const QString& name) {
+        lineStyleMenu->setTitle(QString("Line Style: %1").arg(name));
+        lineStyleMenu->setIcon(makeLineStyleIcon(width, penStyle));
+    };
+
+    connect(thinAction, &QAction::triggered, this, [this, uncheckAllLineStyles, thinAction, updateLineStyleLabel, reopenBorderMenu]() {
+        m_lastBorderWidth = 1; m_lastBorderPenStyle = 0;
+        uncheckAllLineStyles(thinAction);
+        updateLineStyleLabel(1, 0, "Thin");
+        reopenBorderMenu();
+    });
+    connect(mediumAction, &QAction::triggered, this, [this, uncheckAllLineStyles, mediumAction, updateLineStyleLabel, reopenBorderMenu]() {
+        m_lastBorderWidth = 2; m_lastBorderPenStyle = 0;
+        uncheckAllLineStyles(mediumAction);
+        updateLineStyleLabel(2, 0, "Medium");
+        reopenBorderMenu();
+    });
+    connect(thickAction, &QAction::triggered, this, [this, uncheckAllLineStyles, thickAction, updateLineStyleLabel, reopenBorderMenu]() {
+        m_lastBorderWidth = 3; m_lastBorderPenStyle = 0;
+        uncheckAllLineStyles(thickAction);
+        updateLineStyleLabel(3, 0, "Thick");
+        reopenBorderMenu();
+    });
+    connect(thinDashedAction, &QAction::triggered, this, [this, uncheckAllLineStyles, thinDashedAction, updateLineStyleLabel, reopenBorderMenu]() {
+        m_lastBorderWidth = 1; m_lastBorderPenStyle = 1;
+        uncheckAllLineStyles(thinDashedAction);
+        updateLineStyleLabel(1, 1, "Thin Dashed");
+        reopenBorderMenu();
+    });
+    connect(mediumDashedAction, &QAction::triggered, this, [this, uncheckAllLineStyles, mediumDashedAction, updateLineStyleLabel, reopenBorderMenu]() {
+        m_lastBorderWidth = 2; m_lastBorderPenStyle = 1;
+        uncheckAllLineStyles(mediumDashedAction);
+        updateLineStyleLabel(2, 1, "Medium Dashed");
+        reopenBorderMenu();
+    });
+    connect(thinDottedAction, &QAction::triggered, this, [this, uncheckAllLineStyles, thinDottedAction, updateLineStyleLabel, reopenBorderMenu]() {
+        m_lastBorderWidth = 1; m_lastBorderPenStyle = 2;
+        uncheckAllLineStyles(thinDottedAction);
+        updateLineStyleLabel(1, 2, "Dotted");
+        reopenBorderMenu();
+    });
+
+    // ===== Line Color =====
+    auto makeColorSwatchIcon = [](const QColor& color) {
+        return createIcon(16, [color](QPainter& p, int) {
+            p.setRenderHint(QPainter::Antialiasing, true);
+            p.setPen(QPen(QColor("#888"), 0.8));
+            p.setBrush(color);
+            p.drawRoundedRect(1, 1, 14, 14, 2, 2);
+        });
+    };
+    auto* lineColorAction = borderMenu->addAction(
+        makeColorSwatchIcon(m_lastBorderColor),
+        QString("Line Color: %1").arg(m_lastBorderColor.name().toUpper()),
+        this, [this, makeColorSwatchIcon, borderMenu, reopenBorderMenu]() {
+            QColor color = showColorPalette(this, m_lastBorderColor, "Border Color");
+            if (color.isValid()) {
+                m_lastBorderColor = color;
+                // Update the action text and icon to show new color
+                auto actions = borderMenu->actions();
+                for (auto* a : actions) {
+                    if (a->text().startsWith("Line Color:")) {
+                        a->setText(QString("Line Color: %1").arg(color.name().toUpper()));
+                        a->setIcon(makeColorSwatchIcon(color));
+                        break;
+                    }
+                }
+            }
+            reopenBorderMenu();
+        });
 
     borderBtn->setMenu(borderMenu);
-    connect(borderBtn, &QToolButton::clicked, this, [this]() { emit borderStyleSelected("all"); });
+    connect(borderBtn, &QToolButton::clicked, this, [emitBorder]() { emitBorder("all"); });
     bar->addWidget(borderBtn);
 
     // ===== Merge (Excel-style split button with text) =====
@@ -1080,7 +1195,6 @@ QToolBar* Toolbar::createSecondaryToolbar(QWidget* parent) {
         "QToolButton:hover { background-color: #E8ECF0; border-color: #D0D5DD; }"
         "QToolButton::menu-button { width: 13px; border-left: 1px solid #D0D5DD; }"
         "QToolButton::menu-button:hover { background-color: #D8DCE0; }"
-        "QToolButton::menu-arrow { image: none; }"
     );
 
     QMenu* mergeMenu = new QMenu(mergeBtn);
@@ -1098,38 +1212,238 @@ QToolBar* Toolbar::createSecondaryToolbar(QWidget* parent) {
 
     bar->addSeparator();
 
-    // ===== Number formatting =====
+    // ===== Number Format Dropdown (Google Sheets style) =====
+    m_numberFormatBtn = new QToolButton(bar);
+    m_numberFormatBtn->setText("General");
+    m_numberFormatBtn->setToolTip("Number Format");
+    m_numberFormatBtn->setPopupMode(QToolButton::InstantPopup);
+    m_numberFormatBtn->setFixedHeight(24);
+    m_numberFormatBtn->setMinimumWidth(80);
+    m_numberFormatBtn->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    m_numberFormatBtn->setStyleSheet(
+        "QToolButton { background: white; border: 1px solid #D0D5DD; border-radius: 4px; "
+        "padding: 2px 18px 2px 8px; font-size: 11px; color: #344054; text-align: left; }"
+        "QToolButton:hover { border-color: #4A90D9; }"
+        "QToolButton::menu-indicator { subcontrol-position: right center; "
+        "subcontrol-origin: padding; width: 10px; height: 10px; right: 4px; }"
+    );
+
+    // Build the number format menu
+    QMenu* numFmtMenu = new QMenu(m_numberFormatBtn);
+    numFmtMenu->setStyleSheet(
+        "QMenu { background: #FFFFFF; border: 1px solid #D0D5DD; border-radius: 6px; padding: 4px; min-width: 220px; }"
+        "QMenu::item { padding: 6px 16px 6px 12px; border-radius: 4px; font-size: 12px; }"
+        "QMenu::item:selected { background-color: #E8F0FE; }"
+        "QMenu::separator { height: 1px; background: #E0E3E8; margin: 3px 8px; }"
+        "QMenu::item:disabled { color: #999; }"
+    );
+
+    auto addFmtItem = [&](const QString& label, const QString& shortcut, const QString& format) {
+        QAction* action = numFmtMenu->addAction(label);
+        if (!shortcut.isEmpty()) action->setShortcut(QKeySequence(shortcut));
+        connect(action, &QAction::triggered, this, [this, format, label]() {
+            emit numberFormatChanged(format);
+            m_numberFormatBtn->setText(label);
+        });
+        return action;
+    };
+
+    addFmtItem("General", "", "General");
+    addFmtItem("Number", "Ctrl+Shift+1", "Number");
+
+    // --- Accounting submenu ---
+    QMenu* accountingMenu = numFmtMenu->addMenu("Accounting");
+    accountingMenu->setStyleSheet(numFmtMenu->styleSheet());
+    for (const auto& cur : NumberFormat::currencies()) {
+        accountingMenu->addAction(
+            QString("%1  %2").arg(cur.symbol, -4).arg(cur.label),
+            this, [this, cur]() {
+                emit accountingFormatSelected(cur.code);
+                m_numberFormatBtn->setText("Accounting");
+            });
+    }
+
+    // --- Currency submenu ---
+    QMenu* currencyMenu = numFmtMenu->addMenu("Currency");
+    currencyMenu->setStyleSheet(numFmtMenu->styleSheet());
+    for (const auto& cur : NumberFormat::currencies()) {
+        currencyMenu->addAction(
+            QString("%1  %2").arg(cur.symbol, -4).arg(cur.label),
+            this, [this, cur]() {
+                emit currencyFormatSelected(cur.code);
+                m_numberFormatBtn->setText("Currency");
+            });
+    }
+
+    // --- Date submenu with live previews ---
+    QMenu* dateMenu = numFmtMenu->addMenu("Date");
+    dateMenu->setStyleSheet(
+        "QMenu { background: #FFFFFF; border: 1px solid #D0D5DD; border-radius: 6px; padding: 4px; min-width: 360px; }"
+        "QMenu::item { padding: 6px 16px 6px 12px; border-radius: 4px; font-size: 12px; }"
+        "QMenu::item:selected { background-color: #E8F0FE; }"
+        "QMenu::separator { height: 1px; background: #E0E3E8; margin: 3px 8px; }"
+        "QMenu::item:disabled { color: #888; font-size: 11px; font-weight: bold; }"
+    );
+
+    QDate today = QDate::currentDate();
+    QDateTime now = QDateTime::currentDateTime();
+
+    // Date section header
+    auto* dateHeader = dateMenu->addAction("Date");
+    dateHeader->setEnabled(false);
+    dateMenu->addSeparator();
+
+    struct DateFmt { QString preview; QString qtFmt; QString fmtId; QString label; };
+    QList<DateFmt> dateFmts = {
+        { today.toString("d/M/yy"),               "d/M/yy",                "d/M/yy",              "d/M/yy" },
+        { today.toString("d MMM, yyyy"),           "d MMM, yyyy",           "d MMM, yyyy",         "d MMM, yyyy" },
+        { today.toString("d MMMM, yyyy"),          "d MMMM, yyyy",         "d MMMM, yyyy",        "d MMMM, yyyy" },
+        { today.toString("dddd, d MMMM, yyyy"),    "dddd, d MMMM, yyyy",   "EEEE, d MMMM, yyyy", "EEEE, d MMMM, yyyy" },
+        { today.toString("dd/MM/yyyy"),            "dd/MM/yyyy",            "dd/MM/yyyy",          "dd/MM/yyyy" },
+        { today.toString("MM/dd/yyyy"),            "MM/dd/yyyy",            "MM/dd/yyyy",          "MM/dd/yyyy" },
+        { today.toString("yyyy/MM/dd"),            "yyyy/MM/dd",            "yyyy/MM/dd",          "yyyy/MM/dd" },
+    };
+
+    for (const auto& df : dateFmts) {
+        QAction* action = dateMenu->addAction(QString("%1").arg(df.preview));
+        // Show format code on the right via tooltip
+        action->setToolTip(df.label);
+        connect(action, &QAction::triggered, this, [this, df]() {
+            emit dateFormatSelected(df.fmtId);
+            m_numberFormatBtn->setText("Date");
+        });
+    }
+
+    // Date and Time section
+    dateMenu->addSeparator();
+    auto* dtHeader = dateMenu->addAction("Date and Time");
+    dtHeader->setEnabled(false);
+    dateMenu->addSeparator();
+
+    struct DateTimeFmt { QString fmtId; QString qtFmt; };
+    QList<DateTimeFmt> dtFmts = {
+        { "d/M/yy h:mm:ss a z",      "d/M/yy h:mm:ss AP t" },
+        { "d MMM, yyyy h:mm:ss a z",  "d MMM, yyyy h:mm:ss AP t" },
+        { "d MMMM, yyyy h:mm:ss a",   "d MMMM, yyyy h:mm:ss AP" },
+        { "EEEE, d MMMM, yyyy h:mm a","dddd, d MMMM, yyyy h:mm AP" },
+        { "d/M/yy h:mm a",            "d/M/yy h:mm AP" },
+    };
+
+    for (const auto& dtf : dtFmts) {
+        QString preview = now.toString(dtf.qtFmt);
+        QAction* action = dateMenu->addAction(preview);
+        connect(action, &QAction::triggered, this, [this, dtf]() {
+            emit dateFormatSelected(dtf.fmtId);
+            m_numberFormatBtn->setText("Date");
+        });
+    }
+
+    // --- Time ---
+    addFmtItem("Time", "Ctrl+Shift+2", "Time");
+
+    // --- Percentage ---
+    addFmtItem("Percentage", "Ctrl+Shift+5", "Percentage");
+
+    // --- Fraction ---
+    addFmtItem("Fraction", "", "Fraction");
+
+    // --- Scientific ---
+    addFmtItem("Scientific", "Ctrl+Shift+6", "Scientific");
+
+    // --- Text ---
+    addFmtItem("Text", "", "Text");
+
+    numFmtMenu->addSeparator();
+
+    // --- More Formats... (opens Format Cells dialog) ---
+    numFmtMenu->addAction("More Formats...", this, &Toolbar::formatCellsRequested);
+
+    m_numberFormatBtn->setMenu(numFmtMenu);
+    bar->addWidget(m_numberFormatBtn);
+
+    // Quick-access currency button
     QToolButton* currencyBtn = new QToolButton(bar);
-    currencyBtn->setText("$");
+    currencyBtn->setText("\u20B9");  // ₹ (Indian Rupee — matches screenshot)
     currencyBtn->setFont(QFont("Arial", 12, QFont::Bold));
     currencyBtn->setToolTip("Currency Format");
-    currencyBtn->setFixedSize(26, 24);
+    currencyBtn->setPopupMode(QToolButton::MenuButtonPopup);
+    currencyBtn->setFixedSize(40, 24);
+    currencyBtn->setStyleSheet(
+        "QToolButton { background: transparent; border: 1px solid transparent; border-radius: 4px; padding: 2px 4px; }"
+        "QToolButton:hover { background-color: #E8ECF0; border-color: #D0D5DD; }"
+        "QToolButton::menu-button { width: 12px; border-left: 1px solid #D0D5DD; }"
+        "QToolButton::menu-button:hover { background-color: #D8DCE0; }"
+    );
+    QMenu* quickCurrMenu = new QMenu(currencyBtn);
+    quickCurrMenu->setStyleSheet(numFmtMenu->styleSheet());
+    for (const auto& cur : NumberFormat::currencies()) {
+        quickCurrMenu->addAction(
+            QString("%1  %2").arg(cur.symbol, -4).arg(cur.label),
+            this, [this, cur]() {
+                emit currencyFormatSelected(cur.code);
+                m_numberFormatBtn->setText("Currency");
+            });
+    }
+    currencyBtn->setMenu(quickCurrMenu);
     bar->addWidget(currencyBtn);
-    connect(currencyBtn, &QToolButton::clicked, this, [this]() { emit numberFormatChanged("Currency"); });
+    connect(currencyBtn, &QToolButton::clicked, this, [this]() {
+        emit numberFormatChanged("Currency");
+        m_numberFormatBtn->setText("Currency");
+    });
 
-    QToolButton* percentBtn = new QToolButton(bar);
-    percentBtn->setText("%");
-    percentBtn->setFont(QFont("Arial", 12, QFont::Bold));
-    percentBtn->setToolTip("Percentage Format");
-    percentBtn->setFixedSize(26, 24);
-    bar->addWidget(percentBtn);
-    connect(percentBtn, &QToolButton::clicked, this, [this]() { emit numberFormatChanged("Percentage"); });
-
+    // Thousand separator (,)
     QToolButton* thousandBtn = new QToolButton(bar);
-    thousandBtn->setText(",");
-    thousandBtn->setFont(QFont("Arial", 13, QFont::Bold));
+    thousandBtn->setText("(,)");
+    thousandBtn->setFont(QFont("Arial", 10, QFont::Bold));
     thousandBtn->setToolTip("Thousand Separator");
     thousandBtn->setCheckable(true);
-    thousandBtn->setFixedSize(26, 24);
+    thousandBtn->setFixedSize(28, 24);
     bar->addWidget(thousandBtn);
     connect(thousandBtn, &QToolButton::clicked, this, [this]() { emit thousandSeparatorToggled(); });
 
-    QToolButton* formatCellsBtn = new QToolButton(bar);
-    formatCellsBtn->setIcon(createFormatCellsIcon());
-    formatCellsBtn->setToolTip("Format Cells (Ctrl+1)");
-    formatCellsBtn->setFixedSize(28, 24);
-    bar->addWidget(formatCellsBtn);
-    connect(formatCellsBtn, &QToolButton::clicked, this, &Toolbar::formatCellsRequested);
+    // Increase decimals .00 →
+    QToolButton* incDecBtn = new QToolButton(bar);
+    incDecBtn->setToolTip("Increase Decimal Places");
+    incDecBtn->setFixedSize(28, 24);
+    incDecBtn->setIcon(createIcon(16, [](QPainter& p, int) {
+        p.setRenderHint(QPainter::Antialiasing, true);
+        QFont f("Arial", 6);
+        p.setFont(f);
+        p.setPen(QColor("#555"));
+        p.drawText(QRect(0, 1, 12, 14), Qt::AlignCenter, ".00");
+        // Arrow right
+        p.setPen(QPen(QColor("#4A90D9"), 1.4, Qt::SolidLine, Qt::RoundCap));
+        p.drawLine(11, 8, 15, 8);
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor("#4A90D9"));
+        QPolygonF arr;
+        arr << QPointF(14, 6) << QPointF(14, 10) << QPointF(16, 8);
+        p.drawPolygon(arr);
+    }));
+    bar->addWidget(incDecBtn);
+    connect(incDecBtn, &QToolButton::clicked, this, &Toolbar::increaseDecimals);
+
+    // Decrease decimals .00 ←
+    QToolButton* decDecBtn = new QToolButton(bar);
+    decDecBtn->setToolTip("Decrease Decimal Places");
+    decDecBtn->setFixedSize(28, 24);
+    decDecBtn->setIcon(createIcon(16, [](QPainter& p, int) {
+        p.setRenderHint(QPainter::Antialiasing, true);
+        QFont f("Arial", 6);
+        p.setFont(f);
+        p.setPen(QColor("#555"));
+        p.drawText(QRect(4, 1, 12, 14), Qt::AlignCenter, ".0");
+        // Arrow left
+        p.setPen(QPen(QColor("#4A90D9"), 1.4, Qt::SolidLine, Qt::RoundCap));
+        p.drawLine(5, 8, 1, 8);
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor("#4A90D9"));
+        QPolygonF arr;
+        arr << QPointF(2, 6) << QPointF(2, 10) << QPointF(0, 8);
+        p.drawPolygon(arr);
+    }));
+    bar->addWidget(decDecBtn);
+    connect(decDecBtn, &QToolButton::clicked, this, &Toolbar::decreaseDecimals);
 
     bar->addSeparator();
 
@@ -1163,7 +1477,12 @@ QToolBar* Toolbar::createSecondaryToolbar(QWidget* parent) {
     tableBtn->setIcon(createTableIcon());
     tableBtn->setToolTip("Format as Table");
     tableBtn->setPopupMode(QToolButton::InstantPopup);
-    tableBtn->setFixedSize(28, 24);
+    tableBtn->setFixedSize(38, 24);
+    tableBtn->setStyleSheet(
+        "QToolButton { background: transparent; border: 1px solid transparent; border-radius: 4px; padding: 2px 4px; }"
+        "QToolButton:hover { background-color: #E8ECF0; border-color: #D0D5DD; }"
+        "QToolButton::menu-indicator { subcontrol-position: right center; width: 8px; height: 8px; }"
+    );
 
     QMenu* tableMenu = new QMenu(tableBtn);
     tableMenu->setStyleSheet(
@@ -1213,6 +1532,53 @@ QToolBar* Toolbar::createSecondaryToolbar(QWidget* parent) {
     validationBtn->setFixedSize(28, 24);
     bar->addWidget(validationBtn);
     connect(validationBtn, &QToolButton::clicked, this, &Toolbar::dataValidationRequested);
+
+    bar->addSeparator();
+
+    // ===== Checkbox =====
+    QToolButton* checkboxBtn = new QToolButton(bar);
+    checkboxBtn->setIcon(createIcon(16, [](QPainter& p, int) {
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.setPen(QPen(QColor("#107C10"), 1.5));
+        p.setBrush(Qt::white);
+        p.drawRoundedRect(2, 2, 12, 12, 2, 2);
+        p.setPen(QPen(QColor("#107C10"), 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        p.drawLine(4, 8, 6, 11);
+        p.drawLine(6, 11, 12, 4);
+    }));
+    checkboxBtn->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    checkboxBtn->setToolTip("Insert Checkbox");
+    checkboxBtn->setFixedHeight(24);
+    bar->addWidget(checkboxBtn);
+    connect(checkboxBtn, &QToolButton::clicked, this, &Toolbar::insertCheckboxRequested);
+
+    // ===== Picklist (dropdown menu: Insert + Manage) =====
+    QToolButton* picklistBtn = new QToolButton(bar);
+    picklistBtn->setIcon(createIcon(16, [](QPainter& p, int) {
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor("#DBEAFE"));
+        p.drawRoundedRect(1, 1, 14, 6, 3, 3);
+        p.setPen(QColor("#1E40AF"));
+        QFont f = p.font(); f.setPixelSize(5); p.setFont(f);
+        p.drawText(QRect(1, 1, 14, 6), Qt::AlignCenter, "Tag");
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor("#FCE7F3"));
+        p.drawRoundedRect(1, 9, 14, 6, 3, 3);
+        p.setPen(QColor("#9D174D"));
+        p.drawText(QRect(1, 9, 14, 6), Qt::AlignCenter, "Tag");
+    }));
+    picklistBtn->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    picklistBtn->setText("Picklist");
+    picklistBtn->setToolTip("Picklist");
+    picklistBtn->setFixedHeight(24);
+    picklistBtn->setPopupMode(QToolButton::MenuButtonPopup);
+    QMenu* picklistMenu = new QMenu(picklistBtn);
+    picklistMenu->addAction("Insert Picklist", this, &Toolbar::insertPicklistRequested);
+    picklistMenu->addAction("Manage Picklists...", this, &Toolbar::managePicklistsRequested);
+    picklistBtn->setMenu(picklistMenu);
+    connect(picklistBtn, &QToolButton::clicked, this, &Toolbar::insertPicklistRequested);
+    bar->addWidget(picklistBtn);
 
     bar->addSeparator();
 
@@ -1273,4 +1639,83 @@ QToolBar* Toolbar::createSecondaryToolbar(QWidget* parent) {
     connect(chatBtn, &QToolButton::clicked, this, &Toolbar::chatToggleRequested);
 
     return bar;
+}
+
+void Toolbar::updateBgColorIcon() {
+    if (!m_bgColorBtn) return;
+    m_bgColorBtn->setIcon(createIcon(16, [this](QPainter& p, int) {
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.setPen(Qt::NoPen);
+
+        // Paint drop — single clean teardrop in active color
+        p.setBrush(m_lastBgColor);
+        QPainterPath drop;
+        drop.moveTo(8, 1);
+        drop.cubicTo(3, 6, 2, 10, 5, 12);
+        drop.cubicTo(6.5, 13, 9.5, 13, 11, 12);
+        drop.cubicTo(14, 10, 13, 6, 8, 1);
+        p.drawPath(drop);
+
+        // Thin outline to keep it visible on white
+        p.setPen(QPen(QColor("#666"), 0.6));
+        p.setBrush(Qt::NoBrush);
+        p.drawPath(drop);
+
+        // Color bar at bottom
+        p.setRenderHint(QPainter::Antialiasing, false);
+        p.setPen(Qt::NoPen);
+        p.setBrush(m_lastBgColor);
+        p.drawRect(1, 14, 14, 2);
+    }));
+    m_bgColorBtn->setStyleSheet(
+        "QToolButton { background: transparent; border: 1px solid transparent; border-radius: 4px; }"
+        "QToolButton:hover { background-color: #E8ECF0; border-color: #D0D5DD; }");
+}
+
+void Toolbar::syncToStyle(const CellStyle& style) {
+    // Block signals so we don't trigger formatting changes on the cell
+    m_fontCombo->blockSignals(true);
+    m_fontSizeSpinBox->blockSignals(true);
+
+    // Font family and size
+    m_fontCombo->setCurrentFont(QFont(style.fontName));
+    m_fontSizeSpinBox->setValue(style.fontSize);
+
+    m_fontCombo->blockSignals(false);
+    m_fontSizeSpinBox->blockSignals(false);
+
+    // Bold / Italic / Underline / Strikethrough
+    if (m_boldBtn) m_boldBtn->setChecked(style.bold);
+    if (m_italicBtn) m_italicBtn->setChecked(style.italic);
+    if (m_underlineBtn) m_underlineBtn->setChecked(style.underline);
+    if (m_strikethroughBtn) m_strikethroughBtn->setChecked(style.strikethrough);
+
+    // Font color
+    if (m_fgColorBtn) {
+        m_lastFgColor = QColor(style.foregroundColor);
+        m_fgColorBtn->setStyleSheet(
+            QString("QToolButton { color: %1; font-weight: bold; border-bottom: 3px solid %1; border-radius: 4px; }")
+                .arg(style.foregroundColor));
+    }
+
+    // Fill color
+    if (m_bgColorBtn) {
+        m_lastBgColor = QColor(style.backgroundColor);
+        updateBgColorIcon();
+    }
+
+    // Horizontal alignment
+    if (m_alignLeftBtn) m_alignLeftBtn->setChecked(style.hAlign == HorizontalAlignment::Left);
+    if (m_alignCenterBtn) m_alignCenterBtn->setChecked(style.hAlign == HorizontalAlignment::Center);
+    if (m_alignRightBtn) m_alignRightBtn->setChecked(style.hAlign == HorizontalAlignment::Right);
+
+    // Vertical alignment
+    if (m_vAlignTopBtn) m_vAlignTopBtn->setChecked(style.vAlign == VerticalAlignment::Top);
+    if (m_vAlignMiddleBtn) m_vAlignMiddleBtn->setChecked(style.vAlign == VerticalAlignment::Middle);
+    if (m_vAlignBottomBtn) m_vAlignBottomBtn->setChecked(style.vAlign == VerticalAlignment::Bottom);
+
+    // Number format dropdown text
+    if (m_numberFormatBtn) {
+        m_numberFormatBtn->setText(style.numberFormat == "General" ? "General" : style.numberFormat);
+    }
 }

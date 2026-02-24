@@ -259,6 +259,16 @@ bool CsvService::exportToFile(const Spreadsheet& spreadsheet, const QString& fil
                 if (cell->getType() == CellType::Formula) {
                     value = cell->getComputedValue();
                 }
+                // Picklist: export pipe-separated as comma-separated
+                const auto& style = cell->getStyle();
+                if (style.numberFormat == "Picklist") {
+                    value = value.toString().replace('|', ", ");
+                }
+                // Checkbox: export as TRUE/FALSE
+                if (style.numberFormat == "Checkbox") {
+                    bool checked = value.toBool() || value.toString().toLower() == "true" || value.toString() == "1";
+                    value = checked ? "TRUE" : "FALSE";
+                }
                 QString str = value.toString();
                 if (str.contains(',') || str.contains('"') || str.contains('\n')) {
                     str.replace('"', "\"\"");

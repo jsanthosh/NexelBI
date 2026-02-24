@@ -11,7 +11,118 @@
 #include <QApplication>
 #include <QTimer>
 #include <QColor>
+#include <QDate>
+#include <QRegularExpression>
 #include <limits>
+
+// Convert a QDate to Excel serial number (days since 1899-12-30)
+static double dateToSerial(const QDate& date) {
+    static const QDate epoch(1899, 12, 30);
+    return epoch.daysTo(date);
+}
+
+// Convert Excel serial number to QDate
+static QDate serialToDate(double serial) {
+    static const QDate epoch(1899, 12, 30);
+    return epoch.addDays(static_cast<int>(serial));
+}
+
+// Try to parse user input as a date. Returns true + QDate + suggested format ID.
+static bool tryParseDate(const QString& input, QDate& outDate, QString& outFormatId) {
+    QString trimmed = input.trimmed();
+    if (trimmed.isEmpty()) return false;
+
+    int currentYear = QDate::currentDate().year();
+
+    // Try ISO format: 2026-01-15
+    QDate d = QDate::fromString(trimmed, Qt::ISODate);
+    if (d.isValid()) { outDate = d; outFormatId = "dd/MM/yyyy"; return true; }
+
+    // Try MM/dd/yyyy
+    d = QDate::fromString(trimmed, "MM/dd/yyyy");
+    if (d.isValid()) { outDate = d; outFormatId = "MM/dd/yyyy"; return true; }
+
+    // Try dd/MM/yyyy
+    d = QDate::fromString(trimmed, "dd/MM/yyyy");
+    if (d.isValid()) { outDate = d; outFormatId = "dd/MM/yyyy"; return true; }
+
+    // Try M/d/yyyy
+    d = QDate::fromString(trimmed, "M/d/yyyy");
+    if (d.isValid()) { outDate = d; outFormatId = "MM/dd/yyyy"; return true; }
+
+    // Try M/d/yy
+    d = QDate::fromString(trimmed, "M/d/yy");
+    if (d.isValid()) {
+        // Qt parses 2-digit year as 1900s — adjust to current century
+        if (d.year() < 100) d = d.addYears(2000);
+        outDate = d; outFormatId = "MM/dd/yyyy"; return true;
+    }
+
+    // Try M-d-yyyy
+    d = QDate::fromString(trimmed, "M-d-yyyy");
+    if (d.isValid()) { outDate = d; outFormatId = "MM/dd/yyyy"; return true; }
+
+    // Try d-MMM-yy (e.g., 2-Dec-26)
+    d = QDate::fromString(trimmed, "d-MMM-yy");
+    if (d.isValid()) {
+        if (d.year() < 100) d = d.addYears(2000);
+        outDate = d; outFormatId = "d MMM, yyyy"; return true;
+    }
+
+    // Try d-MMM-yyyy (e.g., 2-Dec-2026)
+    d = QDate::fromString(trimmed, "d-MMM-yyyy");
+    if (d.isValid()) { outDate = d; outFormatId = "d MMM, yyyy"; return true; }
+
+    // Try "MMM d" (e.g., "Dec 2", "Jan 15") — use current year
+    d = QDate::fromString(trimmed, "MMM d");
+    if (d.isValid()) {
+        outDate = QDate(currentYear, d.month(), d.day());
+        outFormatId = "d MMM, yyyy";
+        return true;
+    }
+
+    // Try "MMM d, yyyy" (e.g., "Dec 2, 2026")
+    d = QDate::fromString(trimmed, "MMM d, yyyy");
+    if (d.isValid()) { outDate = d; outFormatId = "d MMM, yyyy"; return true; }
+
+    // Try "MMMM d" (e.g., "December 2") — use current year
+    d = QDate::fromString(trimmed, "MMMM d");
+    if (d.isValid()) {
+        outDate = QDate(currentYear, d.month(), d.day());
+        outFormatId = "d MMMM, yyyy";
+        return true;
+    }
+
+    // Try "MMMM d, yyyy" (e.g., "December 2, 2026")
+    d = QDate::fromString(trimmed, "MMMM d, yyyy");
+    if (d.isValid()) { outDate = d; outFormatId = "d MMMM, yyyy"; return true; }
+
+    // Try "d MMM" (e.g., "2 Dec") — use current year
+    d = QDate::fromString(trimmed, "d MMM");
+    if (d.isValid()) {
+        outDate = QDate(currentYear, d.month(), d.day());
+        outFormatId = "d MMM, yyyy";
+        return true;
+    }
+
+    // Try "d MMM yyyy" (e.g., "2 Dec 2026")
+    d = QDate::fromString(trimmed, "d MMM yyyy");
+    if (d.isValid()) { outDate = d; outFormatId = "d MMM, yyyy"; return true; }
+
+    // Try M/d (e.g., "12/2") — use current year; only if both parts look like month/day
+    static QRegularExpression mdRe("^(\\d{1,2})/(\\d{1,2})$");
+    auto match = mdRe.match(trimmed);
+    if (match.hasMatch()) {
+        int m = match.captured(1).toInt();
+        int day = match.captured(2).toInt();
+        if (m >= 1 && m <= 12 && day >= 1 && day <= 31) {
+            d = QDate(currentYear, m, day);
+            if (d.isValid()) { outDate = d; outFormatId = "MM/dd/yyyy"; return true; }
+        }
+    }
+
+    return false;
+}
 
 SpreadsheetModel::SpreadsheetModel(std::shared_ptr<Spreadsheet> spreadsheet, QObject* parent)
     : QAbstractTableModel(parent), m_spreadsheet(spreadsheet) {
@@ -66,6 +177,21 @@ QVariant SpreadsheetModel::data(const QModelIndex& index, int role) const {
                     return table->theme.headerFg;
                 return QVariant();
             }
+            case Qt::TextAlignmentRole: {
+                if (m_spreadsheet->hasDefaultCellStyle()) {
+                    const auto& ds = m_spreadsheet->getDefaultCellStyle();
+                    int alignment = 0;
+                    if (ds.vAlign == VerticalAlignment::Top) alignment |= Qt::AlignTop;
+                    else if (ds.vAlign == VerticalAlignment::Bottom) alignment |= Qt::AlignBottom;
+                    else alignment |= Qt::AlignVCenter;
+                    if (ds.hAlign == HorizontalAlignment::Left) alignment |= Qt::AlignLeft;
+                    else if (ds.hAlign == HorizontalAlignment::Right) alignment |= Qt::AlignRight;
+                    else if (ds.hAlign == HorizontalAlignment::Center) alignment |= Qt::AlignHCenter;
+                    else alignment |= Qt::AlignLeft;
+                    return alignment;
+                }
+                return QVariant();
+            }
             default:
                 return QVariant();
         }
@@ -92,6 +218,18 @@ QVariant SpreadsheetModel::data(const QModelIndex& index, int role) const {
         case Qt::EditRole: {
             if (cell->getType() == CellType::Formula) {
                 return cell->getFormula();
+            }
+            // For date-formatted cells, show the date string in the editor (not serial number)
+            if (baseStyle.numberFormat == "Date") {
+                auto value = m_spreadsheet->getCellValue(CellAddress(index.row(), index.column()));
+                bool ok;
+                double serial = value.toDouble(&ok);
+                if (ok && serial > 0 && serial < 200000) {
+                    QDate date = serialToDate(serial);
+                    if (date.isValid()) {
+                        return date.toString("MM/dd/yyyy");
+                    }
+                }
             }
             return m_spreadsheet->getCellValue(CellAddress(index.row(), index.column()));
         }
@@ -182,16 +320,24 @@ QVariant SpreadsheetModel::data(const QModelIndex& index, int role) const {
             } else if (baseStyle.hAlign == HorizontalAlignment::Center) {
                 alignment |= Qt::AlignHCenter;
             } else {
-                // General: right-align numbers, left-align text
-                auto value = m_spreadsheet->getCellValue(CellAddress(index.row(), index.column()));
-                bool isNumber = false;
-                if (value.typeId() == QMetaType::Double || value.typeId() == QMetaType::Int ||
-                    value.typeId() == QMetaType::LongLong || value.typeId() == QMetaType::Float) {
-                    isNumber = true;
+                // General: right-align numbers and dates, left-align text
+                bool isRightAligned = false;
+                // Date-formatted cells are always right-aligned
+                if (baseStyle.numberFormat == "Date" || baseStyle.numberFormat == "Time" ||
+                    baseStyle.numberFormat == "Currency" || baseStyle.numberFormat == "Accounting" ||
+                    baseStyle.numberFormat == "Percentage" || baseStyle.numberFormat == "Number" ||
+                    baseStyle.numberFormat == "Scientific" || baseStyle.numberFormat == "Fraction") {
+                    isRightAligned = true;
                 } else {
-                    value.toString().toDouble(&isNumber);
+                    auto value = m_spreadsheet->getCellValue(CellAddress(index.row(), index.column()));
+                    if (value.typeId() == QMetaType::Double || value.typeId() == QMetaType::Int ||
+                        value.typeId() == QMetaType::LongLong || value.typeId() == QMetaType::Float) {
+                        isRightAligned = true;
+                    } else {
+                        value.toString().toDouble(&isRightAligned);
+                    }
                 }
-                alignment |= isNumber ? Qt::AlignRight : Qt::AlignLeft;
+                alignment |= isRightAligned ? Qt::AlignRight : Qt::AlignLeft;
             }
             return alignment;
         }
@@ -201,22 +347,22 @@ QVariant SpreadsheetModel::data(const QModelIndex& index, int role) const {
         }
         case Qt::UserRole + 11: { // Border top
             const auto& b = cell->getStyle().borderTop;
-            if (b.enabled) return QString("%1,%2").arg(b.width).arg(b.color);
+            if (b.enabled) return QString("%1,%2,%3").arg(b.width).arg(b.color).arg(b.penStyle);
             return QVariant();
         }
         case Qt::UserRole + 12: { // Border bottom
             const auto& b = cell->getStyle().borderBottom;
-            if (b.enabled) return QString("%1,%2").arg(b.width).arg(b.color);
+            if (b.enabled) return QString("%1,%2,%3").arg(b.width).arg(b.color).arg(b.penStyle);
             return QVariant();
         }
         case Qt::UserRole + 13: { // Border left
             const auto& b = cell->getStyle().borderLeft;
-            if (b.enabled) return QString("%1,%2").arg(b.width).arg(b.color);
+            if (b.enabled) return QString("%1,%2,%3").arg(b.width).arg(b.color).arg(b.penStyle);
             return QVariant();
         }
         case Qt::UserRole + 14: { // Border right
             const auto& b = cell->getStyle().borderRight;
-            if (b.enabled) return QString("%1,%2").arg(b.width).arg(b.color);
+            if (b.enabled) return QString("%1,%2,%3").arg(b.width).arg(b.color).arg(b.penStyle);
             return QVariant();
         }
         case Qt::UserRole + 16: { // Text rotation
@@ -335,14 +481,54 @@ bool SpreadsheetModel::setData(const QModelIndex& index, const QVariant& value, 
         }
     }
 
+    // If the cell didn't exist before and there's a sheet-level default style, apply it
+    bool wasNew = (m_spreadsheet->getCellIfExists(addr) == nullptr);
+
+    // Auto-detect date input (before setting value, so we can convert to serial)
+    QDate parsedDate;
+    QString dateFormatId;
+    bool isDateInput = false;
+    if (!strValue.startsWith("=")) {
+        // Only try date detection if not already a plain number
+        bool isNum = false;
+        strValue.toDouble(&isNum);
+        if (!isNum) {
+            isDateInput = tryParseDate(strValue, parsedDate, dateFormatId);
+        }
+    }
+
     if (!m_suppressUndo) {
         // Single-cell edit: capture before/after for undo
         CellSnapshot before = m_spreadsheet->takeCellSnapshot(addr);
 
         if (strValue.startsWith("=")) {
             m_spreadsheet->setCellFormula(addr, strValue);
+        } else if (isDateInput) {
+            // Store as Excel serial number
+            double serial = dateToSerial(parsedDate);
+            m_spreadsheet->setCellValue(addr, QVariant(serial));
+            // Set date format on the cell
+            auto cell = m_spreadsheet->getCell(addr);
+            CellStyle style = cell->getStyle();
+            style.numberFormat = "Date";
+            style.dateFormatId = dateFormatId;
+            cell->setStyle(style);
         } else {
             m_spreadsheet->setCellValue(addr, value);
+        }
+
+        // Apply default style to newly created cells
+        if (wasNew && m_spreadsheet->hasDefaultCellStyle()) {
+            auto cell = m_spreadsheet->getCell(addr);
+            if (cell && !cell->hasCustomStyle()) {
+                CellStyle defaultStyle = m_spreadsheet->getDefaultCellStyle();
+                // Preserve date format if we just set it
+                if (isDateInput) {
+                    defaultStyle.numberFormat = "Date";
+                    defaultStyle.dateFormatId = dateFormatId;
+                }
+                cell->setStyle(defaultStyle);
+            }
         }
 
         CellSnapshot after = m_spreadsheet->takeCellSnapshot(addr);
@@ -352,8 +538,28 @@ bool SpreadsheetModel::setData(const QModelIndex& index, const QVariant& value, 
         // Bulk operation: caller handles undo tracking
         if (strValue.startsWith("=")) {
             m_spreadsheet->setCellFormula(addr, strValue);
+        } else if (isDateInput) {
+            double serial = dateToSerial(parsedDate);
+            m_spreadsheet->setCellValue(addr, QVariant(serial));
+            auto cell = m_spreadsheet->getCell(addr);
+            CellStyle style = cell->getStyle();
+            style.numberFormat = "Date";
+            style.dateFormatId = dateFormatId;
+            cell->setStyle(style);
         } else {
             m_spreadsheet->setCellValue(addr, value);
+        }
+
+        if (wasNew && m_spreadsheet->hasDefaultCellStyle()) {
+            auto cell = m_spreadsheet->getCell(addr);
+            if (cell && !cell->hasCustomStyle()) {
+                CellStyle defaultStyle = m_spreadsheet->getDefaultCellStyle();
+                if (isDateInput) {
+                    defaultStyle.numberFormat = "Date";
+                    defaultStyle.dateFormatId = dateFormatId;
+                }
+                cell->setStyle(defaultStyle);
+            }
         }
     }
 

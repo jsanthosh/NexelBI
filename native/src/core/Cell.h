@@ -34,6 +34,7 @@ struct BorderStyle {
     bool enabled = false;
     QString color = "#000000";
     int width = 1; // 1=thin, 2=medium, 3=thick
+    int penStyle = 0; // 0=solid, 1=dashed, 2=dotted
 };
 
 struct CellStyle {

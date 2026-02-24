@@ -1,8 +1,10 @@
 #include "FormulaBar.h"
+#include "FormulaPopupDelegate.h"
 #include "../core/FormulaMetadata.h"
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QKeyEvent>
+#include <QApplication>
 
 FormulaBar::FormulaBar(QWidget* parent)
     : QWidget(parent) {
@@ -46,6 +48,7 @@ void FormulaBar::setCellAddress(const QString& address) {
 }
 
 void FormulaBar::setCellContent(const QString& content) {
+    hideAllPanels();
     m_formulaEdit->blockSignals(true);
     m_formulaEdit->setText(content);
     m_formulaEdit->blockSignals(false);
@@ -82,17 +85,27 @@ void FormulaBar::replaceLastInsertedText(const QString& newText) {
     }
 }
 
+void FormulaBar::hideAllPanels() {
+    if (m_popup) m_popup->hide();
+    if (m_paramHint) m_paramHint->hide();
+    if (m_detailPanel) m_detailPanel->hide();
+}
+
 void FormulaBar::setupAutocomplete() {
     m_popup = new QListWidget(window());
     m_popup->setWindowFlags(Qt::Popup | Qt::FramelessWindowHint);
     m_popup->setAttribute(Qt::WA_ShowWithoutActivating);
     m_popup->setFocusPolicy(Qt::NoFocus);
     m_popup->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_popup->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     m_popup->setStyleSheet(
-        "QListWidget { background: white; border: 1px solid #C8C8C8; font-size: 12px; outline: none; }"
-        "QListWidget::item { padding: 4px 8px; border: none; }"
-        "QListWidget::item:selected { background: #E8F0FE; }"
+        "QListWidget { background: white; border: 1px solid #C0C0C0; outline: none; "
+        "border-radius: 6px; }"
+        "QListWidget::item { padding: 0px; border: none; }"
+        "QListWidget::item:selected { background: transparent; }"
+        "QListWidget::item:hover { background: transparent; }"
     );
+    m_popup->setItemDelegate(new FormulaPopupDelegate(m_popup));
     m_popup->hide();
 
     m_paramHint = new QLabel(window());
@@ -104,11 +117,32 @@ void FormulaBar::setupAutocomplete() {
     m_paramHint->setTextFormat(Qt::RichText);
     m_paramHint->hide();
 
+    m_detailPanel = new QLabel(window());
+    m_detailPanel->setWindowFlags(Qt::ToolTip | Qt::FramelessWindowHint);
+    m_detailPanel->setAttribute(Qt::WA_ShowWithoutActivating);
+    m_detailPanel->setStyleSheet(
+        "QLabel { background: white; border: 1px solid #D0D0D0; padding: 12px; "
+        "border-radius: 6px; }");
+    m_detailPanel->setTextFormat(Qt::RichText);
+    m_detailPanel->setWordWrap(true);
+    m_detailPanel->setFixedWidth(340);
+    m_detailPanel->hide();
+
+    // Click on popup item → show detail panel
     connect(m_popup, &QListWidget::itemClicked, this, [this](QListWidgetItem* item) {
-        insertFunction(item->data(Qt::UserRole).toString());
+        QString funcName = item->data(FuncNameRole).toString();
+        const auto& reg = formulaRegistry();
+        if (reg.contains(funcName)) {
+            m_detailPanel->setText(buildDetailHtml(reg[funcName]));
+            m_detailPanel->adjustSize();
+            QPoint pos = m_popup->mapToGlobal(QPoint(m_popup->width() + 4, 0));
+            m_detailPanel->move(pos);
+            m_detailPanel->show();
+        }
     });
 
     connect(m_formulaEdit, &QLineEdit::textEdited, this, [this]() {
+        m_detailPanel->hide();
         updatePopup();
         updateParamHint();
     });
@@ -117,12 +151,14 @@ void FormulaBar::setupAutocomplete() {
         updateParamHint();
     });
 
-    // Install event filter to handle keyboard in formula edit for popup navigation
+    // Install event filter on BOTH popup (for key forwarding) and formula edit
+    m_popup->installEventFilter(this);
     m_formulaEdit->installEventFilter(this);
 }
 
 bool FormulaBar::eventFilter(QObject* obj, QEvent* event) {
-    if (obj == m_formulaEdit && event->type() == QEvent::KeyPress && m_popup && m_popup->isVisible()) {
+    // Handle key events from popup (Qt::Popup grabs keyboard)
+    if (obj == m_popup && event->type() == QEvent::KeyPress) {
         auto* ke = static_cast<QKeyEvent*>(event);
         if (ke->key() == Qt::Key_Down) {
             int next = m_popup->currentRow() + 1;
@@ -136,11 +172,27 @@ bool FormulaBar::eventFilter(QObject* obj, QEvent* event) {
         }
         if (ke->key() == Qt::Key_Return || ke->key() == Qt::Key_Enter || ke->key() == Qt::Key_Tab) {
             auto* item = m_popup->currentItem();
-            if (item) insertFunction(item->data(Qt::UserRole).toString());
+            if (item) {
+                insertFunction(item->data(FuncNameRole).toString());
+                hideAllPanels();
+            }
             return true;
         }
         if (ke->key() == Qt::Key_Escape) {
-            m_popup->hide();
+            hideAllPanels();
+            m_formulaEdit->setFocus();
+            return true;
+        }
+        // Forward all other keys (typing) to formula edit
+        QApplication::sendEvent(m_formulaEdit, event);
+        return true;
+    }
+    // Handle Esc on formula edit (when popup is not visible)
+    if (obj == m_formulaEdit && event->type() == QEvent::KeyPress) {
+        auto* ke = static_cast<QKeyEvent*>(event);
+        if (ke->key() == Qt::Key_Escape) {
+            hideAllPanels();
+            m_formulaEdit->clearFocus();
             return true;
         }
     }
@@ -174,23 +226,18 @@ void FormulaBar::updatePopup() {
     m_popup->clear();
     const auto& reg = formulaRegistry();
     for (auto it = reg.begin(); it != reg.end(); ++it) {
-        if (it->name.contains(token, Qt::CaseInsensitive)) {
+        if (it->name.startsWith(token, Qt::CaseInsensitive)) {
             auto* item = new QListWidgetItem(m_popup);
-            item->setData(Qt::UserRole, it->name);
-            QString display = it->name;
-            while (display.length() < 14) display += ' ';
-            item->setText(display + it->description);
-            QFont f = m_popup->font();
-            f.setPointSize(11);
-            item->setFont(f);
+            item->setData(FuncNameRole, it->name);
+            item->setData(FuncDescRole, it->description);
         }
     }
 
     if (m_popup->count() > 0) {
         QPoint pos = m_formulaEdit->mapToGlobal(QPoint(0, m_formulaEdit->height()));
-        m_popup->setFixedWidth(qMax(420, m_formulaEdit->width()));
+        m_popup->setFixedWidth(qMax(460, m_formulaEdit->width()));
         int visibleItems = qMin(m_popup->count(), 8);
-        m_popup->setFixedHeight(visibleItems * 26 + 4);
+        m_popup->setFixedHeight(visibleItems * 30 + 6);
         m_popup->move(pos);
         m_popup->show();
         m_popup->setCurrentRow(0);
@@ -227,6 +274,7 @@ void FormulaBar::updateParamHint() {
 
 void FormulaBar::insertFunction(const QString& funcName) {
     m_popup->hide();
+    m_detailPanel->hide();
     QString text = m_formulaEdit->text();
     // Find current token to replace
     QString afterEq = text.mid(1);

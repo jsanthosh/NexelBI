@@ -37,6 +37,7 @@ private:
     QLineEdit* m_formulaEdit;
     QListWidget* m_popup = nullptr;
     QLabel* m_paramHint = nullptr;
+    QLabel* m_detailPanel = nullptr;
     int m_lastInsertPos = -1;
     int m_lastInsertLen = 0;
 
@@ -44,6 +45,7 @@ private:
     void updatePopup();
     void updateParamHint();
     void insertFunction(const QString& funcName);
+    void hideAllPanels();
 };
 
 #endif // FORMULABAR_H

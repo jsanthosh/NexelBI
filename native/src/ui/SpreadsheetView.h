@@ -12,6 +12,7 @@
 #include "../core/Cell.h"
 #include "../core/CellRange.h"
 
+class QLabel;
 class Spreadsheet;
 class SpreadsheetModel;
 class CellDelegate;
@@ -49,6 +50,11 @@ public:
     void applyBackgroundColor(const QColor& color);
     void applyThousandSeparator();
     void applyNumberFormat(const QString& format);
+    void applyDateFormat(const QString& dateFormatId);
+    void applyCurrencyFormat(const QString& currencyCode);
+    void applyAccountingFormat(const QString& currencyCode);
+    void increaseDecimals();
+    void decreaseDecimals();
 
     // Alignment
     void applyHAlign(HorizontalAlignment align);
@@ -62,7 +68,7 @@ public:
     void applyTextRotation(int degrees);
 
     // Borders
-    void applyBorderStyle(const QString& borderType);
+    void applyBorderStyle(const QString& borderType, const QColor& color = QColor("#000000"), int width = 1, int penStyle = 0);
 
     // Merge cells
     void mergeCells();
@@ -84,6 +90,14 @@ public:
     void deleteCellsShiftUp();
     void deleteEntireRow();
     void deleteEntireColumn();
+
+    // Picklist & Checkbox
+    void insertPicklist(const QStringList& options);
+    void insertCheckbox();
+    void toggleCheckbox(int row, int col);
+    void showPicklistPopup(const QModelIndex& index);
+    void openPicklistManageDialog(int row, int col);
+    void openPicklistManagerDialog();
 
     // Tables
     void applyTableStyle(int themeIndex);
@@ -188,6 +202,12 @@ private:
     // Multi-resize guard
     bool m_resizingMultiple = false;
 
+    // Resize tooltip
+    QLabel* m_resizeTooltip = nullptr;
+    QTimer* m_resizeTooltipTimer = nullptr;
+    void showResizeTooltip(const QPoint& globalPos, const QString& text);
+    void hideResizeTooltip();
+
     // Auto filter state
     bool m_filterActive = false;
     int m_filterHeaderRow = 0;
@@ -260,6 +280,9 @@ private:
     };
     ChartRangeHighlight m_chartHighlight;
     bool m_chartHighlightActive = false;
+
+    // Picklist popup re-entry guard
+    bool m_picklistPopupOpen = false;
 };
 
 #endif // SPREADSHEETVIEW_H

@@ -15,6 +15,7 @@
 #include "ShapePropertiesDialog.h"
 #include "ChartPropertiesPanel.h"
 #include "../core/Spreadsheet.h"
+#include "../core/Cell.h"
 #include "../core/UndoManager.h"
 #include "../core/CellRange.h"
 #include "../services/DocumentService.h"
@@ -663,6 +664,11 @@ void MainWindow::connectSignals() {
 
     connect(m_toolbar, &Toolbar::thousandSeparatorToggled, m_spreadsheetView, &SpreadsheetView::applyThousandSeparator);
     connect(m_toolbar, &Toolbar::numberFormatChanged, m_spreadsheetView, &SpreadsheetView::applyNumberFormat);
+    connect(m_toolbar, &Toolbar::dateFormatSelected, m_spreadsheetView, &SpreadsheetView::applyDateFormat);
+    connect(m_toolbar, &Toolbar::currencyFormatSelected, m_spreadsheetView, &SpreadsheetView::applyCurrencyFormat);
+    connect(m_toolbar, &Toolbar::accountingFormatSelected, m_spreadsheetView, &SpreadsheetView::applyAccountingFormat);
+    connect(m_toolbar, &Toolbar::increaseDecimals, m_spreadsheetView, &SpreadsheetView::increaseDecimals);
+    connect(m_toolbar, &Toolbar::decreaseDecimals, m_spreadsheetView, &SpreadsheetView::decreaseDecimals);
     connect(m_toolbar, &Toolbar::formatCellsRequested, this, &MainWindow::onFormatCells);
 
     connect(m_toolbar, &Toolbar::formatPainterToggled, m_spreadsheetView, &SpreadsheetView::activateFormatPainter);
@@ -673,7 +679,9 @@ void MainWindow::connectSignals() {
 
     connect(m_toolbar, &Toolbar::tableStyleSelected, m_spreadsheetView, &SpreadsheetView::applyTableStyle);
 
-    connect(m_toolbar, &Toolbar::borderStyleSelected, m_spreadsheetView, &SpreadsheetView::applyBorderStyle);
+    connect(m_toolbar, &Toolbar::borderStyleSelected, this, [this](const QString& type, const QColor& color, int width, int penStyle) {
+        m_spreadsheetView->applyBorderStyle(type, color, width, penStyle);
+    });
     connect(m_toolbar, &Toolbar::mergeCellsRequested, m_spreadsheetView, &SpreadsheetView::mergeCells);
     connect(m_toolbar, &Toolbar::unmergeCellsRequested, m_spreadsheetView, &SpreadsheetView::unmergeCells);
     connect(m_toolbar, &Toolbar::increaseIndent, m_spreadsheetView, &SpreadsheetView::increaseIndent);
@@ -686,6 +694,36 @@ void MainWindow::connectSignals() {
     // Chart and shape insertion from toolbar
     connect(m_toolbar, &Toolbar::insertChartRequested, this, &MainWindow::onInsertChart);
     connect(m_toolbar, &Toolbar::insertShapeRequested, this, &MainWindow::onInsertShape);
+
+    // Checkbox insertion
+    connect(m_toolbar, &Toolbar::insertCheckboxRequested, this, [this]() {
+        m_spreadsheetView->insertCheckbox();
+        setDirty();
+    });
+
+    // Picklist manager
+    connect(m_toolbar, &Toolbar::managePicklistsRequested, this, [this]() {
+        m_spreadsheetView->openPicklistManagerDialog();
+    });
+
+    // Picklist insertion — prompt for options
+    connect(m_toolbar, &Toolbar::insertPicklistRequested, this, [this]() {
+        bool ok;
+        QString input = QInputDialog::getMultiLineText(this, "Insert Picklist",
+            "Enter picklist options (one per line):",
+            "Option 1\nOption 2\nOption 3", &ok);
+        if (ok && !input.trimmed().isEmpty()) {
+            QStringList options;
+            for (const QString& line : input.split('\n', Qt::SkipEmptyParts)) {
+                QString trimmed = line.trimmed();
+                if (!trimmed.isEmpty()) options.append(trimmed);
+            }
+            if (!options.isEmpty()) {
+                m_spreadsheetView->insertPicklist(options);
+                setDirty();
+            }
+        }
+    });
 
     // Chat assistant toggle
     connect(m_toolbar, &Toolbar::chatToggleRequested, this, [this]() {
@@ -703,13 +741,26 @@ void MainWindow::connectSignals() {
     connect(m_spreadsheetView, &SpreadsheetView::formatCellsRequested, this, &MainWindow::onFormatCells);
 
     connect(m_spreadsheetView, &SpreadsheetView::cellSelected,
-            this, [this](int, int, const QString& content, const QString& address) {
+            this, [this](int row, int col, const QString& content, const QString& address) {
         // Don't update formula bar if we're in formula editing mode (would overwrite the formula)
         if (m_spreadsheetView->isFormulaEditMode() || m_formulaBar->isFormulaEditing()) {
             return;
         }
         m_formulaBar->setCellAddress(address);
         m_formulaBar->setCellContent(content);
+
+        // Sync toolbar to reflect the focused cell's formatting
+        auto spreadsheet = m_spreadsheetView->getSpreadsheet();
+        if (spreadsheet) {
+            auto cell = spreadsheet->getCellIfExists(row, col);
+            if (cell) {
+                m_toolbar->syncToStyle(cell->getStyle());
+            } else if (spreadsheet->hasDefaultCellStyle()) {
+                m_toolbar->syncToStyle(spreadsheet->getDefaultCellStyle());
+            } else {
+                m_toolbar->syncToStyle(Cell::defaultStyle());
+            }
+        }
 
         // Update status bar with selection summary (SUM, AVERAGE, COUNT like Excel)
         updateStatusBarSummary();
@@ -1899,6 +1950,68 @@ void MainWindow::onChatActions(const QJsonArray& actions) {
             rule->setStyle(style);
 
             sheet->getConditionalFormatting().addRule(rule);
+        }
+
+        // ===== Insert checkbox =====
+        else if (type == "insert_checkbox") {
+            QString rangeStr = action["range"].toString();
+            CellRange range(rangeStr);
+            for (const auto& addr : range.getCells()) {
+                auto cell = sheet->getCell(addr);
+                CellStyle style = cell->getStyle();
+                style.numberFormat = "Checkbox";
+                cell->setStyle(style);
+                if (cell->getValue().isNull() || cell->getValue().toString().isEmpty()) {
+                    bool val = action.contains("checked") ? action["checked"].toBool() : false;
+                    cell->setValue(QVariant(val));
+                }
+            }
+        }
+
+        // ===== Insert picklist =====
+        else if (type == "insert_picklist") {
+            QString rangeStr = action["range"].toString();
+            CellRange range(rangeStr);
+            QStringList options;
+            if (action.contains("options")) {
+                for (const auto& v : action["options"].toArray()) {
+                    options.append(v.toString());
+                }
+            }
+            // Create validation rule
+            Spreadsheet::DataValidationRule rule;
+            rule.range = range;
+            rule.type = Spreadsheet::DataValidationRule::List;
+            rule.listItems = options;
+            rule.showErrorAlert = false;
+            sheet->addValidationRule(rule);
+            // Set numberFormat
+            for (const auto& addr : range.getCells()) {
+                auto cell = sheet->getCell(addr);
+                CellStyle style = cell->getStyle();
+                style.numberFormat = "Picklist";
+                cell->setStyle(style);
+                if (action.contains("value")) {
+                    cell->setValue(action["value"].toString());
+                }
+            }
+        }
+
+        // ===== Set picklist value =====
+        else if (type == "set_picklist") {
+            QString cellRef = action["cell"].toString();
+            CellAddress addr = parseCellRef(cellRef);
+            auto cell = sheet->getCell(addr);
+            cell->setValue(action["value"].toString()); // pipe-separated values
+        }
+
+        // ===== Toggle checkbox =====
+        else if (type == "toggle_checkbox") {
+            QString cellRef = action["cell"].toString();
+            CellAddress addr = parseCellRef(cellRef);
+            auto cell = sheet->getCell(addr);
+            bool current = cell->getValue().toBool();
+            cell->setValue(QVariant(!current));
         }
     }
 

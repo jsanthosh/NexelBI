@@ -140,6 +140,11 @@ public:
     const std::map<int, int>& getRowHeights() const { return m_rowHeights; }
     const std::map<int, int>& getColumnWidths() const { return m_columnWidths; }
 
+    // Sheet-level default style (applied to empty cells, e.g. after Select All + format)
+    void setDefaultCellStyle(const CellStyle& style) { m_defaultCellStyle = style; m_hasDefaultStyle = true; }
+    const CellStyle& getDefaultCellStyle() const { return m_defaultCellStyle; }
+    bool hasDefaultCellStyle() const { return m_hasDefaultStyle; }
+
     // Pivot table support
     void setPivotConfig(std::unique_ptr<PivotConfig> config);
     const PivotConfig* getPivotConfig() const;
@@ -212,6 +217,8 @@ private:
     std::map<int, int> m_rowHeights;     // row -> height in pixels
     std::map<int, int> m_columnWidths;   // col -> width in pixels
     bool m_showGridlines = true;
+    CellStyle m_defaultCellStyle;
+    bool m_hasDefaultStyle = false;
     std::unordered_map<CellKey, SparklineConfig, CellKeyHash> m_sparklines;
 
     void recalculate(const CellAddress& addr);

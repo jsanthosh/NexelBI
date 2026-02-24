@@ -41,6 +41,11 @@ private:
     bool m_formulaEditMode = false;
     SpreadsheetView* m_spreadsheetView = nullptr;
     void drawSparkline(QPainter* painter, const QRect& rect, const SparklineRenderData& data) const;
+    void drawCheckbox(QPainter* painter, const QRect& rect, bool checked) const;
+    void drawPicklistTags(QPainter* painter, const QRect& rect, const QString& value,
+                          const QStringList& allOptions) const;
+    static QColor tagBgColor(int index);
+    static QColor tagTextColor(int index);
 };
 
 #endif // CELLDELEGATE_H

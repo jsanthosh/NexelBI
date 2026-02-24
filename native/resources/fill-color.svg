@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="28" viewBox="0 0 32 28">
+  <!-- Handle (dark blue arc) -->
+  <path d="M18 5 C18 -1, 26 -1, 26 6" fill="none" stroke="#1A3A7A" stroke-width="2.8" stroke-linecap="round"/>
+  <!-- Bucket body (tilted ~30° left, pouring) -->
+  <path d="M5.5 5 L22 3 L20 22 L3.5 23 Z" fill="#4285F4" rx="1"/>
+  <!-- Rim band (darker blue) -->
+  <path d="M5.5 5 L22 3 L21.5 7.5 L5 9 Z" fill="#2E67C9"/>
+  <!-- White stripe highlight -->
+  <path d="M17 13 L20.5 12.5 L20 17 L16 17.2 Z" fill="rgba(255,255,255,0.4)"/>
+  <!-- Paint drop from spout (warm orange) -->
+  <path d="M3 23.5 Q1 26.5, 3.5 28 Q5.5 28, 5 26 Q4.5 24.5, 3 23.5 Z" fill="#D4915E"/>
+</svg>

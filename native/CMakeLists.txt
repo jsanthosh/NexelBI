@@ -36,6 +36,7 @@ find_package(Qt6 COMPONENTS
     Network
     Concurrent
     Qml
+    Svg
     REQUIRED
 )
 find_package(Qt6CorePrivate QUIET)
@@ -99,6 +100,7 @@ set(UI_SOURCES
     src/ui/SpreadsheetView.h
     src/ui/CellDelegate.cpp
     src/ui/CellDelegate.h
+    src/ui/FormulaPopupDelegate.h
     src/ui/SpreadsheetModel.cpp
     src/ui/SpreadsheetModel.h
     src/ui/FormulaBar.cpp
@@ -151,6 +153,7 @@ add_executable(NativeSpreadsheet
     ${DATABASE_SOURCES}
     ${SERVICES_SOURCES}
     ${UI_SOURCES}
+    resources/resources.qrc
 )
 
 # Link libraries
@@ -163,6 +166,7 @@ target_link_libraries(NativeSpreadsheet
     Qt6::Network
     Qt6::Concurrent
     Qt6::Qml
+    Qt6::Svg
     SQLite::SQLite3
     Threads::Threads
 )

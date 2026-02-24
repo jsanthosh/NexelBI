@@ -26,6 +26,7 @@
 #include <QPushButton>
 #include <QAbstractButton>
 #include <QScrollBar>
+#include <QTextEdit>
 #include <algorithm>
 
 SpreadsheetView::SpreadsheetView(QWidget* parent)
@@ -167,6 +168,7 @@ void SpreadsheetView::setupConnections() {
             this, &SpreadsheetView::onHorizontalSectionResized);
     connect(verticalHeader(), &QHeaderView::sectionResized,
             this, &SpreadsheetView::onVerticalSectionResized);
+
 }
 
 void SpreadsheetView::setupHeaderContextMenus() {
@@ -245,7 +247,25 @@ void SpreadsheetView::emitCellSelected(const QModelIndex& index) {
     if (cell->getType() == CellType::Formula) {
         content = cell->getFormula();
     } else {
-        content = cell->getValue().toString();
+        // For date-formatted cells, show the date in MM/dd/yyyy in the formula bar
+        const auto& style = cell->getStyle();
+        if (style.numberFormat == "Date") {
+            bool ok;
+            double serial = cell->getValue().toDouble(&ok);
+            if (ok && serial > 0 && serial < 200000) {
+                static const QDate epoch(1899, 12, 30);
+                QDate date = epoch.addDays(static_cast<int>(serial));
+                if (date.isValid()) {
+                    content = date.toString("MM/dd/yyyy");
+                } else {
+                    content = cell->getValue().toString();
+                }
+            } else {
+                content = cell->getValue().toString();
+            }
+        } else {
+            content = cell->getValue().toString();
+        }
     }
 
     emit cellSelected(index.row(), index.column(), content, addr.toString());
@@ -401,13 +421,43 @@ void SpreadsheetView::deleteSelection() {
     for (const auto& index : selected) {
         CellAddress addr(index.row(), index.column());
         before.push_back(m_spreadsheet->takeCellSnapshot(addr));
-        m_model->setData(index, "");
+
+        auto cell = m_spreadsheet->getCell(addr);
+        QString fmt = cell->getStyle().numberFormat;
+
+        // If cell is a Checkbox or Picklist, also clear the special format
+        if (fmt == "Checkbox" || fmt == "Picklist") {
+            CellStyle style = cell->getStyle();
+            style.numberFormat = "General";
+            cell->setStyle(style);
+            cell->setValue(QVariant());
+            // Remove associated validation rule for picklists
+            if (fmt == "Picklist") {
+                auto& rules = m_spreadsheet->getValidationRules();
+                for (int ri = (int)rules.size() - 1; ri >= 0; --ri) {
+                    if (rules[ri].range.contains(addr)) {
+                        m_spreadsheet->removeValidationRule(ri);
+                        break;
+                    }
+                }
+            }
+        } else {
+            m_model->setData(index, "");
+        }
+
         after.push_back(m_spreadsheet->takeCellSnapshot(addr));
     }
     m_model->setSuppressUndo(false);
 
     m_spreadsheet->getUndoManager().pushCommand(
         std::make_unique<MultiCellEditCommand>(before, after, "Delete"));
+
+    // Refresh view for checkbox/picklist cells that were cleared
+    if (m_model) {
+        QModelIndex tl = m_model->index(selected.first().row(), selected.first().column());
+        QModelIndex br = m_model->index(selected.last().row(), selected.last().column());
+        emit m_model->dataChanged(tl, br);
+    }
 }
 
 void SpreadsheetView::selectAll() {
@@ -473,6 +523,16 @@ void SpreadsheetView::applyStyleChange(std::function<void(CellStyle&)> modifier,
     if (!before.empty()) {
         m_spreadsheet->getUndoManager().execute(
             std::make_unique<StyleChangeCommand>(before, after), m_spreadsheet.get());
+    }
+
+    // If the selection covers the full grid, also update the sheet-level default style
+    // so that empty cells (not yet created) also show the formatting
+    if (minRow == 0 && minCol == 0 &&
+        maxRow >= m_model->rowCount() - 1 && maxCol >= m_model->columnCount() - 1) {
+        CellStyle defaultStyle = m_spreadsheet->hasDefaultCellStyle()
+            ? m_spreadsheet->getDefaultCellStyle() : CellStyle();
+        modifier(defaultStyle);
+        m_spreadsheet->setDefaultCellStyle(defaultStyle);
     }
 
     // Use dataChanged instead of resetModel to preserve the selection
@@ -557,6 +617,41 @@ void SpreadsheetView::applyThousandSeparator() {
 void SpreadsheetView::applyNumberFormat(const QString& format) {
     applyStyleChange([&format](CellStyle& s) {
         s.numberFormat = format;
+    }, {Qt::DisplayRole});
+}
+
+void SpreadsheetView::applyDateFormat(const QString& dateFormatId) {
+    applyStyleChange([&dateFormatId](CellStyle& s) {
+        s.numberFormat = "Date";
+        s.dateFormatId = dateFormatId;
+    }, {Qt::DisplayRole});
+}
+
+void SpreadsheetView::applyCurrencyFormat(const QString& currencyCode) {
+    applyStyleChange([&currencyCode](CellStyle& s) {
+        s.numberFormat = "Currency";
+        s.currencyCode = currencyCode;
+    }, {Qt::DisplayRole});
+}
+
+void SpreadsheetView::applyAccountingFormat(const QString& currencyCode) {
+    applyStyleChange([&currencyCode](CellStyle& s) {
+        s.numberFormat = "Accounting";
+        s.currencyCode = currencyCode;
+    }, {Qt::DisplayRole});
+}
+
+void SpreadsheetView::increaseDecimals() {
+    applyStyleChange([](CellStyle& s) {
+        if (s.decimalPlaces < 10) s.decimalPlaces++;
+        if (s.numberFormat == "General") s.numberFormat = "Number";
+    }, {Qt::DisplayRole});
+}
+
+void SpreadsheetView::decreaseDecimals() {
+    applyStyleChange([](CellStyle& s) {
+        if (s.decimalPlaces > 0) s.decimalPlaces--;
+        if (s.numberFormat == "General") s.numberFormat = "Number";
     }, {Qt::DisplayRole});
 }
 
@@ -1012,7 +1107,7 @@ void SpreadsheetView::applyTextRotation(int degrees) {
 
 // ============== Borders ==============
 
-void SpreadsheetView::applyBorderStyle(const QString& borderType) {
+void SpreadsheetView::applyBorderStyle(const QString& borderType, const QColor& color, int width, int penStyle) {
     if (!m_spreadsheet) return;
     QModelIndexList selected = selectionModel()->selectedIndexes();
     if (selected.isEmpty()) return;
@@ -1027,8 +1122,9 @@ void SpreadsheetView::applyBorderStyle(const QString& borderType) {
 
     BorderStyle on;
     on.enabled = true;
-    on.color = "#000000";
-    on.width = 1;
+    on.color = color.name();
+    on.width = width;
+    on.penStyle = penStyle;
 
     BorderStyle off;
     off.enabled = false;
@@ -1065,15 +1161,13 @@ void SpreadsheetView::applyBorderStyle(const QString& borderType) {
         } else if (borderType == "right") {
             if (col == maxCol) s.borderRight = on;
         } else if (borderType == "inside_h") {
-            if (row > minRow) s.borderTop = on;
+            // Only set borderBottom to avoid double-drawing at shared edges
             if (row < maxRow) s.borderBottom = on;
         } else if (borderType == "inside_v") {
-            if (col > minCol) s.borderLeft = on;
+            // Only set borderRight to avoid double-drawing at shared edges
             if (col < maxCol) s.borderRight = on;
         } else if (borderType == "inside") {
-            if (row > minRow) s.borderTop = on;
             if (row < maxRow) s.borderBottom = on;
-            if (col > minCol) s.borderLeft = on;
             if (col < maxCol) s.borderRight = on;
         }
     };
@@ -1094,7 +1188,12 @@ void SpreadsheetView::applyBorderStyle(const QString& borderType) {
             std::make_unique<StyleChangeCommand>(before, after));
     }
 
-    if (m_model) m_model->resetModel();
+    // Use targeted dataChanged instead of resetModel to preserve selection
+    if (m_model) {
+        QModelIndex topLeft = m_model->index(minRow, minCol);
+        QModelIndex bottomRight = m_model->index(maxRow, maxCol);
+        emit m_model->dataChanged(topLeft, bottomRight);
+    }
 }
 
 // ============== Merge Cells ==============
@@ -1201,6 +1300,79 @@ void SpreadsheetView::showCellContextMenu(const QPoint& pos) {
     }
 
     menu.addSeparator();
+
+    // Checkbox / Picklist context actions
+    if (m_spreadsheet) {
+        QModelIndex cur = currentIndex();
+        if (cur.isValid()) {
+            auto cell = m_spreadsheet->getCell(CellAddress(cur.row(), cur.column()));
+            if (cell) {
+                QString fmt = cell->getStyle().numberFormat;
+                if (fmt == "Checkbox") {
+                    menu.addAction("Remove Checkbox", this, [this]() {
+                        if (!m_spreadsheet || !m_model) return;
+                        auto sel = selectionModel()->selectedIndexes();
+                        if (sel.isEmpty()) return;
+                        std::vector<CellSnapshot> before, after;
+                        for (const auto& idx : sel) {
+                            CellAddress addr(idx.row(), idx.column());
+                            before.push_back(m_spreadsheet->takeCellSnapshot(addr));
+                            auto c = m_spreadsheet->getCell(addr);
+                            CellStyle st = c->getStyle();
+                            if (st.numberFormat == "Checkbox") {
+                                st.numberFormat = "General";
+                                c->setStyle(st);
+                                c->setValue(QVariant());
+                            }
+                            after.push_back(m_spreadsheet->takeCellSnapshot(addr));
+                        }
+                        m_spreadsheet->getUndoManager().pushCommand(
+                            std::make_unique<MultiCellEditCommand>(before, after, "Remove Checkbox"));
+                        QModelIndex tl = m_model->index(sel.first().row(), sel.first().column());
+                        QModelIndex br = m_model->index(sel.last().row(), sel.last().column());
+                        emit m_model->dataChanged(tl, br);
+                    });
+                    menu.addSeparator();
+                } else if (fmt == "Picklist") {
+                    menu.addAction("Manage Picklist...", this, [this, cur]() {
+                        showPicklistPopup(cur);
+                    });
+                    menu.addAction("Remove Picklist", this, [this]() {
+                        if (!m_spreadsheet || !m_model) return;
+                        auto sel = selectionModel()->selectedIndexes();
+                        if (sel.isEmpty()) return;
+                        std::vector<CellSnapshot> before, after;
+                        for (const auto& idx : sel) {
+                            CellAddress addr(idx.row(), idx.column());
+                            before.push_back(m_spreadsheet->takeCellSnapshot(addr));
+                            auto c = m_spreadsheet->getCell(addr);
+                            CellStyle st = c->getStyle();
+                            if (st.numberFormat == "Picklist") {
+                                st.numberFormat = "General";
+                                c->setStyle(st);
+                                c->setValue(QVariant());
+                            }
+                            // Also remove validation rule if exists
+                            auto& rules = m_spreadsheet->getValidationRules();
+                            for (int ri = (int)rules.size() - 1; ri >= 0; --ri) {
+                                if (rules[ri].range.contains(addr)) {
+                                    m_spreadsheet->removeValidationRule(ri);
+                                    break;
+                                }
+                            }
+                            after.push_back(m_spreadsheet->takeCellSnapshot(addr));
+                        }
+                        m_spreadsheet->getUndoManager().pushCommand(
+                            std::make_unique<MultiCellEditCommand>(before, after, "Remove Picklist"));
+                        QModelIndex tl = m_model->index(sel.first().row(), sel.first().column());
+                        QModelIndex br = m_model->index(sel.last().row(), sel.last().column());
+                        emit m_model->dataChanged(tl, br);
+                    });
+                    menu.addSeparator();
+                }
+            }
+        }
+    }
 
     menu.addAction("Format Cells...", this, [this]() {
         emit formatCellsRequested();
@@ -1490,6 +1662,18 @@ void SpreadsheetView::setColumnWidth(int col, int width) {
 
 void SpreadsheetView::applyStoredDimensions() {
     if (!m_spreadsheet) return;
+
+    // Reset all sections to default sizes first (so new sheets get clean dimensions)
+    int defaultColW = 80;
+    int defaultRowH = 25;
+    horizontalHeader()->blockSignals(true);
+    verticalHeader()->blockSignals(true);
+    for (int c = 0; c < model()->columnCount(); ++c)
+        horizontalHeader()->resizeSection(c, defaultColW);
+    for (int r = 0; r < model()->rowCount(); ++r)
+        verticalHeader()->resizeSection(r, defaultRowH);
+
+    // Then apply stored per-sheet dimensions
     for (auto& [col, width] : m_spreadsheet->getColumnWidths()) {
         if (col >= 0 && col < model()->columnCount() && width > 0)
             horizontalHeader()->resizeSection(col, width);
@@ -1498,6 +1682,8 @@ void SpreadsheetView::applyStoredDimensions() {
         if (row >= 0 && row < model()->rowCount() && height > 0)
             verticalHeader()->resizeSection(row, height);
     }
+    horizontalHeader()->blockSignals(false);
+    verticalHeader()->blockSignals(false);
 }
 
 void SpreadsheetView::setGridlinesVisible(bool visible) {
@@ -2270,6 +2456,43 @@ void SpreadsheetView::mousePressEvent(QMouseEvent* event) {
         return;
     }
 
+    // Checkbox & Picklist click handling
+    if (event->button() == Qt::LeftButton) {
+        QModelIndex idx = indexAt(event->pos());
+        if (idx.isValid() && m_spreadsheet) {
+            auto cell = m_spreadsheet->getCellIfExists(idx.row(), idx.column());
+            if (cell) {
+                const QString& fmt = cell->getStyle().numberFormat;
+                if (fmt == "Checkbox") {
+                    QRect cellRect = visualRect(idx);
+                    int boxSize = 14;
+                    int cx = cellRect.left() + (cellRect.width() - boxSize) / 2;
+                    int cy = cellRect.top() + (cellRect.height() - boxSize) / 2;
+                    QRect hitArea(cx - 4, cy - 4, boxSize + 8, boxSize + 8);
+                    if (hitArea.contains(event->pos())) {
+                        toggleCheckbox(idx.row(), idx.column());
+                        setCurrentIndex(idx);
+                        event->accept();
+                        return;
+                    }
+                } else if (fmt == "Picklist" && !m_picklistPopupOpen) {
+                    // Single-click opens picklist with re-entry guard
+                    m_picklistPopupOpen = true;
+                    setCurrentIndex(idx);
+                    QTimer::singleShot(0, this, [this, idx]() {
+                        showPicklistPopup(idx);
+                        // Reset guard after a brief delay to prevent re-open from the same click
+                        QTimer::singleShot(300, this, [this]() {
+                            m_picklistPopupOpen = false;
+                        });
+                    });
+                    event->accept();
+                    return;
+                }
+            }
+        }
+    }
+
     // Fill handle drag start
     if (event->button() == Qt::LeftButton && isOverFillHandle(event->pos())) {
         m_fillDragging = true;
@@ -2338,6 +2561,8 @@ void SpreadsheetView::mouseMoveEvent(QMouseEvent* event) {
 }
 
 void SpreadsheetView::mouseReleaseEvent(QMouseEvent* event) {
+    hideResizeTooltip();
+
     if (m_formulaRangeDragging) {
         m_formulaRangeDragging = false;
         viewport()->update();
@@ -2624,15 +2849,48 @@ void SpreadsheetView::performFillSeries() {
 
 // ============== Multi-select resize ==============
 
+void SpreadsheetView::showResizeTooltip(const QPoint& globalPos, const QString& text) {
+    if (!m_resizeTooltip) {
+        m_resizeTooltip = new QLabel(nullptr, Qt::ToolTip | Qt::FramelessWindowHint);
+        m_resizeTooltip->setStyleSheet(
+            "QLabel { background: #333; color: white; padding: 4px 8px; "
+            "border-radius: 3px; font-size: 12px; }");
+    }
+    if (!m_resizeTooltipTimer) {
+        m_resizeTooltipTimer = new QTimer(this);
+        m_resizeTooltipTimer->setSingleShot(true);
+        connect(m_resizeTooltipTimer, &QTimer::timeout, this, &SpreadsheetView::hideResizeTooltip);
+    }
+    m_resizeTooltip->setText(text);
+    m_resizeTooltip->adjustSize();
+    m_resizeTooltip->move(globalPos.x() + 15, globalPos.y() + 15);
+    m_resizeTooltip->show();
+    // Auto-hide 500ms after the last resize event (when user releases mouse)
+    m_resizeTooltipTimer->start(500);
+}
+
+void SpreadsheetView::hideResizeTooltip() {
+    if (m_resizeTooltip) {
+        m_resizeTooltip->hide();
+    }
+}
+
 void SpreadsheetView::onHorizontalSectionResized(int logicalIndex, int /*oldSize*/, int newSize) {
     if (m_resizingMultiple) return;
     m_resizingMultiple = true;
+
+    // Persist dimension to the current sheet
+    if (m_spreadsheet) m_spreadsheet->setColumnWidth(logicalIndex, newSize);
+
+    // Show resize tooltip
+    showResizeTooltip(QCursor::pos(), QString("Width: %1 px").arg(newSize));
 
     QModelIndexList selected = selectionModel()->selectedColumns();
     if (selected.size() > 1) {
         for (const auto& idx : selected) {
             if (idx.column() != logicalIndex) {
                 horizontalHeader()->resizeSection(idx.column(), newSize);
+                if (m_spreadsheet) m_spreadsheet->setColumnWidth(idx.column(), newSize);
             }
         }
     }
@@ -2644,11 +2902,18 @@ void SpreadsheetView::onVerticalSectionResized(int logicalIndex, int /*oldSize*/
     if (m_resizingMultiple) return;
     m_resizingMultiple = true;
 
+    // Persist dimension to the current sheet
+    if (m_spreadsheet) m_spreadsheet->setRowHeight(logicalIndex, newSize);
+
+    // Show resize tooltip
+    showResizeTooltip(QCursor::pos(), QString("Height: %1 px").arg(newSize));
+
     QModelIndexList selected = selectionModel()->selectedRows();
     if (selected.size() > 1) {
         for (const auto& idx : selected) {
             if (idx.row() != logicalIndex) {
                 verticalHeader()->resizeSection(idx.row(), newSize);
+                if (m_spreadsheet) m_spreadsheet->setRowHeight(idx.row(), newSize);
             }
         }
     }
@@ -2663,6 +2928,20 @@ void SpreadsheetView::onCellClicked(const QModelIndex& index) {
 }
 
 void SpreadsheetView::onCellDoubleClicked(const QModelIndex& index) {
+    // Picklist/Checkbox: block normal editor on double-click
+    if (index.isValid() && m_spreadsheet) {
+        auto cell = m_spreadsheet->getCellIfExists(index.row(), index.column());
+        if (cell) {
+            const auto& style = cell->getStyle();
+            if (style.numberFormat == "Picklist") {
+                // Already opened by single-click; just block editor
+                return;
+            }
+            if (style.numberFormat == "Checkbox") {
+                return;
+            }
+        }
+    }
     edit(index);
 }
 
@@ -2737,4 +3016,523 @@ void SpreadsheetView::onFlashTimerTick() {
     if (m_cellAnimations.isEmpty()) {
         m_flashTimer->stop();
     }
+}
+
+// ===== Checkbox toggle with undo =====
+void SpreadsheetView::toggleCheckbox(int row, int col) {
+    if (!m_spreadsheet) return;
+    CellAddress addr(row, col);
+    CellSnapshot before = m_spreadsheet->takeCellSnapshot(addr);
+
+    auto cell = m_spreadsheet->getCell(addr);
+    bool current = false;
+    auto val = cell->getValue();
+    if (val.typeId() == QMetaType::Bool) current = val.toBool();
+    else {
+        QString s = val.toString().toLower();
+        current = (s == "true" || s == "1");
+    }
+    cell->setValue(QVariant(!current));
+
+    CellSnapshot after = m_spreadsheet->takeCellSnapshot(addr);
+    m_spreadsheet->getUndoManager().pushCommand(
+        std::make_unique<CellEditCommand>(before, after));
+
+    if (m_model) {
+        QModelIndex idx = m_model->index(row, col);
+        emit m_model->dataChanged(idx, idx);
+    }
+}
+
+// ===== Insert Checkbox on selected cells =====
+void SpreadsheetView::insertCheckbox() {
+    if (!m_spreadsheet || !m_model) return;
+    auto selection = selectionModel()->selectedIndexes();
+    if (selection.isEmpty()) return;
+
+    std::vector<CellSnapshot> before, after;
+    for (const auto& idx : selection) {
+        CellAddress addr(idx.row(), idx.column());
+        before.push_back(m_spreadsheet->takeCellSnapshot(addr));
+        auto cell = m_spreadsheet->getCell(addr);
+        CellStyle style = cell->getStyle();
+        style.numberFormat = "Checkbox";
+        cell->setStyle(style);
+        if (cell->getValue().isNull() || cell->getValue().toString().isEmpty()) {
+            cell->setValue(QVariant(false));
+        }
+        after.push_back(m_spreadsheet->takeCellSnapshot(addr));
+    }
+    m_spreadsheet->getUndoManager().pushCommand(
+        std::make_unique<MultiCellEditCommand>(before, after, "Insert Checkbox"));
+
+    QModelIndex topLeft = m_model->index(selection.first().row(), selection.first().column());
+    QModelIndex bottomRight = m_model->index(selection.last().row(), selection.last().column());
+    emit m_model->dataChanged(topLeft, bottomRight);
+}
+
+// ===== Insert Picklist on selected cells =====
+void SpreadsheetView::insertPicklist(const QStringList& options) {
+    if (!m_spreadsheet || !m_model) return;
+    auto selection = selectionModel()->selectedIndexes();
+    if (selection.isEmpty()) return;
+
+    // Determine range for validation rule
+    int minRow = INT_MAX, maxRow = 0, minCol = INT_MAX, maxCol = 0;
+    for (const auto& idx : selection) {
+        minRow = qMin(minRow, idx.row());
+        maxRow = qMax(maxRow, idx.row());
+        minCol = qMin(minCol, idx.column());
+        maxCol = qMax(maxCol, idx.column());
+    }
+
+    // Create validation rule with list items
+    Spreadsheet::DataValidationRule rule;
+    rule.range = CellRange(CellAddress(minRow, minCol), CellAddress(maxRow, maxCol));
+    rule.type = Spreadsheet::DataValidationRule::List;
+    rule.listItems = options;
+    rule.showErrorAlert = false; // picklist allows free typing
+    m_spreadsheet->addValidationRule(rule);
+
+    // Set numberFormat to Picklist on all cells
+    std::vector<CellSnapshot> before, after;
+    for (const auto& idx : selection) {
+        CellAddress addr(idx.row(), idx.column());
+        before.push_back(m_spreadsheet->takeCellSnapshot(addr));
+        auto cell = m_spreadsheet->getCell(addr);
+        CellStyle style = cell->getStyle();
+        style.numberFormat = "Picklist";
+        cell->setStyle(style);
+        after.push_back(m_spreadsheet->takeCellSnapshot(addr));
+    }
+    m_spreadsheet->getUndoManager().pushCommand(
+        std::make_unique<MultiCellEditCommand>(before, after, "Insert Picklist"));
+
+    QModelIndex topLeft = m_model->index(minRow, minCol);
+    QModelIndex bottomRight = m_model->index(maxRow, maxCol);
+    emit m_model->dataChanged(topLeft, bottomRight);
+}
+
+// ===== Picklist multi-select popup =====
+void SpreadsheetView::showPicklistPopup(const QModelIndex& index) {
+    if (!m_spreadsheet || !index.isValid()) return;
+
+    auto cell = m_spreadsheet->getCellIfExists(index.row(), index.column());
+    if (!cell) return;
+
+    const auto* rule = m_spreadsheet->getValidationAt(index.row(), index.column());
+    QStringList options = rule ? rule->listItems : QStringList();
+    if (options.isEmpty()) return;
+
+    // Current selected items
+    QString currentVal = cell->getValue().toString();
+    QStringList selected = currentVal.split('|', Qt::SkipEmptyParts);
+    QSet<QString> selectedSet;
+    for (const auto& s : selected) selectedSet.insert(s.trimmed());
+
+    static const QColor tagBg[] = {
+        QColor("#DBEAFE"), QColor("#FCE7F3"), QColor("#EDE9FE"), QColor("#D1FAE5"),
+        QColor("#FEF3C7"), QColor("#FFE4E6"), QColor("#CFFAFE"), QColor("#FEE2E2"),
+        QColor("#F3F4F6"), QColor("#ECFCCB"), QColor("#E0E7FF"), QColor("#FDF2F8")
+    };
+
+    int row = index.row(), col = index.column();
+
+    // --- Popup ---
+    QFrame* popup = new QFrame(this, Qt::Popup | Qt::FramelessWindowHint);
+    popup->setAttribute(Qt::WA_DeleteOnClose);
+    popup->setFixedWidth(210);
+    popup->setObjectName("plPopup");
+    popup->setStyleSheet(
+        "QFrame#plPopup { background: white; border: 1px solid #D1D5DB; border-radius: 8px; }");
+
+    QVBoxLayout* layout = new QVBoxLayout(popup);
+    layout->setContentsMargins(4, 5, 4, 5);
+    layout->setSpacing(1);
+
+    // --- Option rows as checkable QPushButtons ---
+    QList<QPushButton*> optBtns;
+    for (int i = 0; i < options.size(); ++i) {
+        QColor bg = tagBg[i % 12];
+        bool isChecked = selectedSet.contains(options[i]);
+
+        QPushButton* btn = new QPushButton(popup);
+        btn->setCheckable(true);
+        btn->setChecked(isChecked);
+        btn->setCursor(Qt::PointingHandCursor);
+        btn->setFixedHeight(28);
+
+        // Layout: colored circle + text + checkmark
+        QHBoxLayout* bLay = new QHBoxLayout(btn);
+        bLay->setContentsMargins(8, 0, 8, 0);
+        bLay->setSpacing(7);
+
+        QLabel* dot = new QLabel(btn);
+        dot->setFixedSize(10, 10);
+        dot->setStyleSheet(QString("QLabel { background: %1; border-radius: 5px; border: none; }").arg(bg.name()));
+        dot->setAttribute(Qt::WA_TransparentForMouseEvents);
+        bLay->addWidget(dot);
+
+        QLabel* txt = new QLabel(options[i], btn);
+        txt->setStyleSheet("QLabel { font-size: 12px; color: #1F2937; background: transparent; border: none; }");
+        txt->setAttribute(Qt::WA_TransparentForMouseEvents);
+        bLay->addWidget(txt, 1);
+
+        QLabel* chk = new QLabel(btn);
+        chk->setObjectName("chk");
+        chk->setFixedSize(14, 14);
+        chk->setAlignment(Qt::AlignCenter);
+        chk->setAttribute(Qt::WA_TransparentForMouseEvents);
+        if (isChecked) {
+            chk->setText(QString::fromUtf8("\u2713"));
+            chk->setStyleSheet("QLabel { font-size: 12px; color: #2563EB; font-weight: 700; background: transparent; border: none; }");
+        } else {
+            chk->setText("");
+            chk->setStyleSheet("QLabel { background: transparent; border: none; }");
+        }
+        bLay->addWidget(chk);
+
+        btn->setStyleSheet(
+            "QPushButton { background: transparent; border: none; border-radius: 5px; }"
+            "QPushButton:hover { background: #F3F4F6; }"
+            "QPushButton:pressed { background: #E5E7EB; }");
+
+        layout->addWidget(btn);
+        optBtns.append(btn);
+    }
+
+    // --- Separator ---
+    QFrame* sep = new QFrame(popup);
+    sep->setFixedHeight(1);
+    sep->setStyleSheet("QFrame { background: #E5E7EB; border: none; }");
+    layout->addSpacing(3);
+    layout->addWidget(sep);
+    layout->addSpacing(2);
+
+    // --- Edit options button ---
+    QPushButton* editBtn = new QPushButton("Edit options...", popup);
+    editBtn->setCursor(Qt::PointingHandCursor);
+    editBtn->setFixedHeight(24);
+    editBtn->setStyleSheet(
+        "QPushButton { background: transparent; color: #6B7280; border: none; "
+        "font-size: 11px; text-align: left; padding-left: 8px; border-radius: 4px; }"
+        "QPushButton:hover { background: #F3F4F6; color: #2563EB; }");
+    layout->addWidget(editBtn);
+
+    // --- Toggle + instant commit ---
+    for (int i = 0; i < optBtns.size(); ++i) {
+        connect(optBtns[i], &QPushButton::toggled, this,
+            [this, i, optBtns, options, row, col](bool on) {
+            // Update checkmark
+            QLabel* chk = optBtns[i]->findChild<QLabel*>("chk");
+            if (chk) {
+                if (on) {
+                    chk->setText(QString::fromUtf8("\u2713"));
+                    chk->setStyleSheet("QLabel { font-size: 12px; color: #2563EB; font-weight: 700; background: transparent; border: none; }");
+                } else {
+                    chk->setText("");
+                    chk->setStyleSheet("QLabel { background: transparent; border: none; }");
+                }
+            }
+            // Commit
+            QStringList sel;
+            for (int j = 0; j < optBtns.size(); ++j) {
+                if (optBtns[j]->isChecked()) sel.append(options[j]);
+            }
+            CellAddress addr(row, col);
+            CellSnapshot before = m_spreadsheet->takeCellSnapshot(addr);
+            m_spreadsheet->getCell(addr)->setValue(QVariant(sel.join('|')));
+            CellSnapshot after = m_spreadsheet->takeCellSnapshot(addr);
+            m_spreadsheet->getUndoManager().pushCommand(
+                std::make_unique<CellEditCommand>(before, after));
+            if (m_model) {
+                QModelIndex idx = m_model->index(row, col);
+                emit m_model->dataChanged(idx, idx);
+            }
+        });
+    }
+
+    // --- Edit options ---
+    connect(editBtn, &QPushButton::clicked, this, [this, popup, row, col]() {
+        popup->close();
+        openPicklistManageDialog(row, col);
+    });
+
+    // --- Position ---
+    QRect cellRect = visualRect(index);
+    QPoint pos = viewport()->mapToGlobal(QPoint(cellRect.left(), cellRect.bottom() + 2));
+    popup->adjustSize();
+    QScreen* screen = this->screen();
+    if (screen) {
+        QRect sr = screen->availableGeometry();
+        if (pos.y() + popup->height() > sr.bottom())
+            pos.setY(viewport()->mapToGlobal(QPoint(0, cellRect.top())).y() - popup->height() - 2);
+        if (pos.x() + popup->width() > sr.right())
+            pos.setX(sr.right() - popup->width());
+    }
+    popup->move(pos);
+    popup->show();
+}
+
+// ===== Manage Picklist Dialog =====
+void SpreadsheetView::openPicklistManageDialog(int row, int col) {
+    if (!m_spreadsheet) return;
+    auto* rule = const_cast<Spreadsheet::DataValidationRule*>(
+        m_spreadsheet->getValidationAt(row, col));
+    if (!rule) return;
+
+    QDialog dlg(this);
+    dlg.setWindowTitle("Manage Picklist");
+    dlg.setFixedWidth(360);
+    dlg.setStyleSheet(
+        "QDialog { background: white; }"
+        "QTextEdit { border: 1px solid #D1D5DB; border-radius: 8px; padding: 10px; "
+        "font-size: 13px; color: #1F2937; selection-background-color: #DBEAFE; }"
+        "QTextEdit:focus { border-color: #2563EB; }");
+
+    QVBoxLayout* lo = new QVBoxLayout(&dlg);
+    lo->setContentsMargins(20, 20, 20, 20);
+    lo->setSpacing(14);
+
+    QLabel* title = new QLabel("Edit Picklist Options", &dlg);
+    title->setStyleSheet("QLabel { font-size: 15px; font-weight: 600; color: #111827; }");
+    lo->addWidget(title);
+
+    QLabel* sub = new QLabel("Enter one option per line:", &dlg);
+    sub->setStyleSheet("QLabel { font-size: 12px; color: #6B7280; }");
+    lo->addWidget(sub);
+
+    QTextEdit* editor = new QTextEdit(&dlg);
+    editor->setPlainText(rule->listItems.join('\n'));
+    editor->setMinimumHeight(180);
+    editor->setTabChangesFocus(true);
+    lo->addWidget(editor);
+
+    lo->addSpacing(4);
+    QHBoxLayout* btnRow = new QHBoxLayout();
+    btnRow->addStretch();
+
+    QPushButton* cancelBtn = new QPushButton("Cancel", &dlg);
+    cancelBtn->setFixedHeight(34);
+    cancelBtn->setCursor(Qt::PointingHandCursor);
+    cancelBtn->setStyleSheet(
+        "QPushButton { background: white; color: #374151; border: 1px solid #D1D5DB; "
+        "border-radius: 6px; padding: 0 20px; font-size: 13px; font-weight: 500; }"
+        "QPushButton:hover { background: #F9FAFB; border-color: #9CA3AF; }");
+    btnRow->addWidget(cancelBtn);
+
+    QPushButton* saveBtn = new QPushButton("Save", &dlg);
+    saveBtn->setFixedHeight(34);
+    saveBtn->setCursor(Qt::PointingHandCursor);
+    saveBtn->setStyleSheet(
+        "QPushButton { background: #2563EB; color: white; border: none; "
+        "border-radius: 6px; padding: 0 24px; font-size: 13px; font-weight: 600; }"
+        "QPushButton:hover { background: #1D4ED8; }");
+    btnRow->addWidget(saveBtn);
+    lo->addLayout(btnRow);
+
+    connect(cancelBtn, &QPushButton::clicked, &dlg, &QDialog::reject);
+    connect(saveBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+
+    if (dlg.exec() == QDialog::Accepted) {
+        QStringList newOpts;
+        for (const QString& line : editor->toPlainText().split('\n', Qt::SkipEmptyParts)) {
+            QString t = line.trimmed();
+            if (!t.isEmpty()) newOpts.append(t);
+        }
+        rule->listItems = newOpts;
+        if (m_model) {
+            emit m_model->dataChanged(
+                m_model->index(rule->range.getStart().row, rule->range.getStart().col),
+                m_model->index(rule->range.getEnd().row, rule->range.getEnd().col));
+        }
+    }
+}
+
+// ===== Sheet-wide Picklist Manager Dialog =====
+void SpreadsheetView::openPicklistManagerDialog() {
+    if (!m_spreadsheet) return;
+
+    // Collect all picklist validation rules
+    const auto& allRules = m_spreadsheet->getValidationRules();
+    std::vector<int> picklistIndices;
+    for (int i = 0; i < (int)allRules.size(); ++i) {
+        if (allRules[i].type == Spreadsheet::DataValidationRule::List) {
+            picklistIndices.push_back(i);
+        }
+    }
+
+    QDialog dlg(this);
+    dlg.setWindowTitle("Manage Picklists");
+    dlg.setMinimumSize(480, 360);
+    dlg.setStyleSheet(
+        "QDialog { background: white; }"
+        "QLabel { background: transparent; border: none; }");
+
+    QVBoxLayout* mainLo = new QVBoxLayout(&dlg);
+    mainLo->setContentsMargins(20, 20, 20, 16);
+    mainLo->setSpacing(14);
+
+    QLabel* title = new QLabel("Picklists in this Sheet", &dlg);
+    title->setStyleSheet("QLabel { font-size: 16px; font-weight: 600; color: #111827; }");
+    mainLo->addWidget(title);
+
+    if (picklistIndices.empty()) {
+        QLabel* emptyLbl = new QLabel("No picklists found in this sheet.", &dlg);
+        emptyLbl->setStyleSheet("QLabel { font-size: 13px; color: #6B7280; padding: 20px 0; }");
+        emptyLbl->setAlignment(Qt::AlignCenter);
+        mainLo->addWidget(emptyLbl, 1);
+    } else {
+        // Scrollable list of picklist cards
+        QScrollArea* scroll = new QScrollArea(&dlg);
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setStyleSheet("QScrollArea { background: transparent; border: none; }");
+
+        QWidget* listWidget = new QWidget(scroll);
+        QVBoxLayout* listLo = new QVBoxLayout(listWidget);
+        listLo->setContentsMargins(0, 0, 0, 0);
+        listLo->setSpacing(8);
+
+        static const QColor tagBg[] = {
+            QColor("#DBEAFE"), QColor("#FCE7F3"), QColor("#EDE9FE"), QColor("#D1FAE5"),
+            QColor("#FEF3C7"), QColor("#FFE4E6"), QColor("#CFFAFE"), QColor("#FEE2E2"),
+            QColor("#F3F4F6"), QColor("#ECFCCB"), QColor("#E0E7FF"), QColor("#FDF2F8")
+        };
+
+        for (int pi : picklistIndices) {
+            const auto& rule = allRules[pi];
+            QString rangeStr = rule.range.toString();
+            int ruleIndex = pi; // capture for lambda
+
+            // Card frame
+            QFrame* card = new QFrame(listWidget);
+            card->setStyleSheet(
+                "QFrame { background: #F9FAFB; border: 1px solid #E5E7EB; border-radius: 8px; }");
+
+            QVBoxLayout* cardLo = new QVBoxLayout(card);
+            cardLo->setContentsMargins(14, 10, 14, 10);
+            cardLo->setSpacing(6);
+
+            // Row 1: Range + action buttons
+            QHBoxLayout* headerRow = new QHBoxLayout();
+            headerRow->setSpacing(8);
+
+            QLabel* rangeLbl = new QLabel(rangeStr, card);
+            rangeLbl->setStyleSheet(
+                "QLabel { font-size: 13px; font-weight: 600; color: #1F2937; "
+                "background: #E0E7FF; border-radius: 4px; padding: 2px 8px; }");
+            headerRow->addWidget(rangeLbl);
+
+            QLabel* countLbl = new QLabel(
+                QString("%1 option%2").arg(rule.listItems.size()).arg(rule.listItems.size() != 1 ? "s" : ""), card);
+            countLbl->setStyleSheet("QLabel { font-size: 11px; color: #6B7280; }");
+            headerRow->addWidget(countLbl);
+
+            headerRow->addStretch();
+
+            QPushButton* editBtn = new QPushButton("Edit", card);
+            editBtn->setCursor(Qt::PointingHandCursor);
+            editBtn->setFixedHeight(26);
+            editBtn->setStyleSheet(
+                "QPushButton { background: white; color: #374151; border: 1px solid #D1D5DB; "
+                "border-radius: 5px; padding: 0 12px; font-size: 11px; font-weight: 500; }"
+                "QPushButton:hover { background: #F3F4F6; border-color: #9CA3AF; }");
+            headerRow->addWidget(editBtn);
+
+            QPushButton* delBtn = new QPushButton("Delete", card);
+            delBtn->setCursor(Qt::PointingHandCursor);
+            delBtn->setFixedHeight(26);
+            delBtn->setStyleSheet(
+                "QPushButton { background: white; color: #DC2626; border: 1px solid #FCA5A5; "
+                "border-radius: 5px; padding: 0 12px; font-size: 11px; font-weight: 500; }"
+                "QPushButton:hover { background: #FEF2F2; border-color: #DC2626; }");
+            headerRow->addWidget(delBtn);
+
+            cardLo->addLayout(headerRow);
+
+            // Row 2: Tag pills showing the options
+            QHBoxLayout* tagsRow = new QHBoxLayout();
+            tagsRow->setSpacing(4);
+            for (int t = 0; t < rule.listItems.size() && t < 8; ++t) {
+                QLabel* tagLbl = new QLabel(rule.listItems[t], card);
+                QColor bg = tagBg[t % 12];
+                tagLbl->setStyleSheet(QString(
+                    "QLabel { background: %1; color: #374151; font-size: 10px; font-weight: 500; "
+                    "border-radius: 8px; padding: 1px 8px; border: none; }").arg(bg.name()));
+                tagsRow->addWidget(tagLbl);
+            }
+            if (rule.listItems.size() > 8) {
+                QLabel* moreLbl = new QLabel(QString("+%1").arg(rule.listItems.size() - 8), card);
+                moreLbl->setStyleSheet("QLabel { font-size: 10px; color: #6B7280; }");
+                tagsRow->addWidget(moreLbl);
+            }
+            tagsRow->addStretch();
+            cardLo->addLayout(tagsRow);
+
+            listLo->addWidget(card);
+
+            // Edit button: open per-cell manage dialog using first cell in range
+            connect(editBtn, &QPushButton::clicked, &dlg, [this, &dlg, ruleIndex]() {
+                auto& rules = m_spreadsheet->getValidationRules();
+                if (ruleIndex >= 0 && ruleIndex < (int)rules.size()) {
+                    auto& r = rules[ruleIndex];
+                    dlg.close();
+                    openPicklistManageDialog(r.range.getStart().row, r.range.getStart().col);
+                }
+            });
+
+            // Delete button: remove rule + clear picklist format from cells
+            connect(delBtn, &QPushButton::clicked, &dlg, [this, &dlg, ruleIndex]() {
+                auto& rules = m_spreadsheet->getValidationRules();
+                if (ruleIndex < 0 || ruleIndex >= (int)rules.size()) return;
+
+                CellRange range = rules[ruleIndex].range;
+
+                // Clear Picklist format + value from all cells in range
+                std::vector<CellSnapshot> before, after;
+                auto cells = range.getCells();
+                for (const auto& addr : cells) {
+                    auto cell = m_spreadsheet->getCellIfExists(addr.row, addr.col);
+                    if (cell && cell->getStyle().numberFormat == "Picklist") {
+                        before.push_back(m_spreadsheet->takeCellSnapshot(addr));
+                        CellStyle st = cell->getStyle();
+                        st.numberFormat = "General";
+                        cell->setStyle(st);
+                        cell->setValue(QVariant());
+                        after.push_back(m_spreadsheet->takeCellSnapshot(addr));
+                    }
+                }
+                if (!before.empty()) {
+                    m_spreadsheet->getUndoManager().pushCommand(
+                        std::make_unique<MultiCellEditCommand>(before, after, "Delete Picklist"));
+                }
+
+                m_spreadsheet->removeValidationRule(ruleIndex);
+
+                if (m_model) m_model->resetModel();
+                dlg.close();
+            });
+        }
+
+        listLo->addStretch();
+        scroll->setWidget(listWidget);
+        mainLo->addWidget(scroll, 1);
+    }
+
+    // Close button
+    QHBoxLayout* bottomRow = new QHBoxLayout();
+    bottomRow->addStretch();
+    QPushButton* closeBtn = new QPushButton("Close", &dlg);
+    closeBtn->setFixedHeight(34);
+    closeBtn->setCursor(Qt::PointingHandCursor);
+    closeBtn->setStyleSheet(
+        "QPushButton { background: #2563EB; color: white; border: none; "
+        "border-radius: 6px; padding: 0 24px; font-size: 13px; font-weight: 600; }"
+        "QPushButton:hover { background: #1D4ED8; }");
+    connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+    bottomRow->addWidget(closeBtn);
+    mainLo->addLayout(bottomRow);
+
+    dlg.exec();
 }

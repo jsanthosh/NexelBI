@@ -125,6 +125,56 @@ XlsxImportResult XlsxService::importFromFile(const QString& filePath) {
         }
     }
 
+    // Load Nexel-native metadata (picklist/checkbox definitions)
+    QByteArray nexelMetaData = zip.fileData("xl/nexel-metadata.json");
+    if (!nexelMetaData.isEmpty()) {
+        QJsonDocument metaDoc = QJsonDocument::fromJson(nexelMetaData);
+        if (metaDoc.isObject()) {
+            QJsonArray sheetsArray = metaDoc.object()["sheets"].toArray();
+            for (const auto& sheetVal : sheetsArray) {
+                QJsonObject sheetObj = sheetVal.toObject();
+                int si = sheetObj["index"].toInt();
+                if (si < 0 || si >= static_cast<int>(result.sheets.size())) continue;
+                auto* sheet = result.sheets[si].get();
+
+                // Restore picklist validation rules
+                if (sheetObj.contains("picklists")) {
+                    for (const auto& plVal : sheetObj["picklists"].toArray()) {
+                        QJsonObject plObj = plVal.toObject();
+                        Spreadsheet::DataValidationRule rule;
+                        rule.range = CellRange(plObj["range"].toString());
+                        rule.type = Spreadsheet::DataValidationRule::List;
+                        rule.showErrorAlert = false;
+                        for (const auto& item : plObj["options"].toArray()) {
+                            rule.listItems.append(item.toString());
+                        }
+                        sheet->addValidationRule(rule);
+                        // Set Picklist numberFormat on cells in range
+                        for (const auto& addr : rule.range.getCells()) {
+                            auto cell = sheet->getCell(addr);
+                            CellStyle style = cell->getStyle();
+                            style.numberFormat = "Picklist";
+                            cell->setStyle(style);
+                        }
+                    }
+                }
+
+                // Restore checkboxes
+                if (sheetObj.contains("checkboxes")) {
+                    for (const auto& cbVal : sheetObj["checkboxes"].toArray()) {
+                        QJsonObject cbObj = cbVal.toObject();
+                        CellAddress addr = CellAddress::fromString(cbObj["cell"].toString());
+                        auto cell = sheet->getCell(addr);
+                        CellStyle style = cell->getStyle();
+                        style.numberFormat = "Checkbox";
+                        cell->setStyle(style);
+                        cell->setValue(QVariant(cbObj["checked"].toBool()));
+                    }
+                }
+            }
+        }
+    }
+
     // Load Nexel-native chart configs if present
     QByteArray nexelChartsData = zip.fileData("xl/nexel-charts.json");
     if (!nexelChartsData.isEmpty()) {
@@ -1192,6 +1242,57 @@ bool XlsxService::exportToFile(const std::vector<std::shared_ptr<Spreadsheet>>& 
         }
         QJsonDocument doc(chartsArray);
         zip.addFile("xl/nexel-charts.json", doc.toJson(QJsonDocument::Compact));
+    }
+
+    // Save Nexel-native metadata (picklist/checkbox definitions)
+    {
+        QJsonObject metadata;
+        QJsonArray sheetsArray;
+        for (int si = 0; si < static_cast<int>(sheets.size()); ++si) {
+            auto* sheet = sheets[si].get();
+            QJsonObject sheetObj;
+            sheetObj["index"] = si;
+
+            // Picklist/Checkbox cells: scan for cells with these formats
+            QJsonArray picklistRules;
+            for (const auto& rule : sheet->getValidationRules()) {
+                if (rule.type == Spreadsheet::DataValidationRule::List && !rule.listItems.isEmpty()) {
+                    QJsonObject ruleObj;
+                    ruleObj["range"] = rule.range.toString();
+                    QJsonArray items;
+                    for (const auto& item : rule.listItems) items.append(item);
+                    ruleObj["options"] = items;
+                    picklistRules.append(ruleObj);
+                }
+            }
+            if (!picklistRules.isEmpty()) sheetObj["picklists"] = picklistRules;
+
+            // Track checkbox cells
+            QJsonArray checkboxCells;
+            sheet->forEachCell([&](int row, int col, const Cell& cell) {
+                const auto& style = cell.getStyle();
+                if (style.numberFormat == "Checkbox") {
+                    QJsonObject cb;
+                    cb["cell"] = CellAddress(row, col).toString();
+                    cb["checked"] = cell.getValue().toBool() ||
+                                    cell.getValue().toString().toLower() == "true" ||
+                                    cell.getValue().toString() == "1";
+                    checkboxCells.append(cb);
+                } else if (style.numberFormat == "Picklist") {
+                    // Picklist values stored in validation rules above; just mark the format
+                }
+            });
+            if (!checkboxCells.isEmpty()) sheetObj["checkboxes"] = checkboxCells;
+
+            if (sheetObj.contains("picklists") || sheetObj.contains("checkboxes")) {
+                sheetsArray.append(sheetObj);
+            }
+        }
+        if (!sheetsArray.isEmpty()) {
+            metadata["sheets"] = sheetsArray;
+            QJsonDocument metaDoc(metadata);
+            zip.addFile("xl/nexel-metadata.json", metaDoc.toJson(QJsonDocument::Compact));
+        }
     }
 
     zip.close();

@@ -374,6 +374,14 @@ QString ChatPanel::buildContext() const {
         context += "Merged regions: " + QString::number(merged.size()) + "\n";
     }
 
+    // Validation rules (Picklist/Checkbox info)
+    const auto& rules = m_spreadsheet->getValidationRules();
+    for (const auto& rule : rules) {
+        if (rule.type == Spreadsheet::DataValidationRule::List && !rule.listItems.isEmpty()) {
+            context += "Picklist at " + rule.range.toString() + ": " + rule.listItems.join(", ") + "\n";
+        }
+    }
+
     // Sample data
     int maxRow = qMin(m_spreadsheet->getMaxRow(), 14);
     int maxCol = qMin(m_spreadsheet->getMaxColumn(), 9);
@@ -452,6 +460,10 @@ void ChatPanel::sendToApi(const QString& userMessage) {
         "- insert_image: Insert floating image. Fields: path (file path), width (pixels, optional), height (pixels, optional)\n"
         "- run_macro: Execute JavaScript macro. Fields: code (JS string using sheet.getCellValue/setCellValue/setBold etc.)\n"
         "- record_macro: Start/stop macro recording. Fields: action (\"start\"/\"stop\")\n"
+        "- insert_checkbox: Insert checkboxes. Fields: range, checked (bool, optional, default false)\n"
+        "- insert_picklist: Insert multi-select picklist. Fields: range, options (array of strings), value (pipe-separated string, optional)\n"
+        "- set_picklist: Set picklist value. Fields: cell, value (pipe-separated like \"Option1|Option2\")\n"
+        "- toggle_checkbox: Toggle a checkbox. Fields: cell\n"
         "- conditional_format: Create conditional formatting rule (auto-updates). Fields: range, "
         "condition (\"greater_than\"/\"less_than\"/\"equal\"/\"not_equal\"/\"greater_than_or_equal\"/\"less_than_or_equal\"/\"between\"/\"contains\"), "
         "value (number or string), value2 (only for \"between\"), "

@@ -1,5 +1,6 @@
 #include "CellDelegate.h"
 #include "SpreadsheetView.h"
+#include "FormulaPopupDelegate.h"
 #include "../core/FormulaMetadata.h"
 #include <QLineEdit>
 #include <QPainter>
@@ -15,6 +16,24 @@
 #include <QVBoxLayout>
 #include <QFrame>
 #include <QScrollBar>
+#include <QScreen>
+#include "../core/Spreadsheet.h"
+
+// ===== Picklist tag color palettes (12 pastel bg + dark text pairs) =====
+static const QColor s_tagBgColors[] = {
+    QColor("#DBEAFE"), QColor("#FCE7F3"), QColor("#EDE9FE"), QColor("#D1FAE5"),
+    QColor("#FEF3C7"), QColor("#FFE4E6"), QColor("#CFFAFE"), QColor("#FEE2E2"),
+    QColor("#F3F4F6"), QColor("#ECFCCB"), QColor("#E0E7FF"), QColor("#FDF2F8")
+};
+static const QColor s_tagTextColors[] = {
+    QColor("#1E40AF"), QColor("#9D174D"), QColor("#5B21B6"), QColor("#065F46"),
+    QColor("#92400E"), QColor("#9F1239"), QColor("#155E75"), QColor("#991B1B"),
+    QColor("#374151"), QColor("#3F6212"), QColor("#3730A3"), QColor("#831843")
+};
+static constexpr int TAG_COLOR_COUNT = 12;
+
+QColor CellDelegate::tagBgColor(int index) { return s_tagBgColors[index % TAG_COLOR_COUNT]; }
+QColor CellDelegate::tagTextColor(int index) { return s_tagTextColors[index % TAG_COLOR_COUNT]; }
 
 // Extract the token currently being typed (after last delimiter)
 static QString extractCurrentToken(const QString& text) {
@@ -36,53 +55,88 @@ CellDelegate::CellDelegate(QObject* parent)
     : QStyledItemDelegate(parent) {
 }
 
+static void hideAllPopups(QObject* editorOrPopup) {
+    // Retrieve editor from popup, or use directly
+    QLineEdit* ed = qobject_cast<QLineEdit*>(editorOrPopup);
+    if (!ed) ed = qobject_cast<QLineEdit*>(editorOrPopup->property("_editor").value<QObject*>());
+    if (!ed) return;
+    auto* p = qobject_cast<QListWidget*>(ed->property("_formulaPopup").value<QObject*>());
+    auto* h = qobject_cast<QLabel*>(ed->property("_paramHint").value<QObject*>());
+    auto* d = qobject_cast<QLabel*>(ed->property("_detailPanel").value<QObject*>());
+    if (p) p->hide();
+    if (h) h->hide();
+    if (d) d->hide();
+}
+
+static void insertFunctionFromPopup(QListWidget* popup, QLineEdit* editor) {
+    auto* item = popup->currentItem();
+    if (!item) return;
+    QString funcName = item->data(FuncNameRole).toString();
+    hideAllPopups(editor);
+    QString text = editor->text();
+    QString token = extractCurrentToken(text);
+    if (!token.isEmpty()) {
+        int tokenStart = text.length() - token.length();
+        editor->setText(text.left(tokenStart) + funcName + "(");
+        editor->setCursorPosition(editor->text().length());
+    }
+    editor->setFocus();
+}
+
 bool CellDelegate::eventFilter(QObject* object, QEvent* event) {
+    // Handle key events from the popup (Qt::Popup grabs keyboard)
+    if (auto* popupWidget = qobject_cast<QListWidget*>(object)) {
+        if (event->type() == QEvent::KeyPress) {
+            auto* ke = static_cast<QKeyEvent*>(event);
+            auto* ed = qobject_cast<QLineEdit*>(
+                popupWidget->property("_editor").value<QObject*>());
+            if (!ed) return false;
+
+            if (ke->key() == Qt::Key_Down) {
+                int next = popupWidget->currentRow() + 1;
+                if (next < popupWidget->count()) popupWidget->setCurrentRow(next);
+                return true;
+            }
+            if (ke->key() == Qt::Key_Up) {
+                int prev = popupWidget->currentRow() - 1;
+                if (prev >= 0) popupWidget->setCurrentRow(prev);
+                return true;
+            }
+            if (ke->key() == Qt::Key_Return || ke->key() == Qt::Key_Enter ||
+                ke->key() == Qt::Key_Tab) {
+                insertFunctionFromPopup(popupWidget, ed);
+                return true;
+            }
+            if (ke->key() == Qt::Key_Escape) {
+                hideAllPopups(popupWidget);
+                m_formulaEditMode = false;
+                emit formulaEditModeChanged(false);
+                emit closeEditor(ed, QAbstractItemDelegate::RevertModelCache);
+                return true;
+            }
+            // Forward all other keys (typing) to the editor
+            QApplication::sendEvent(ed, event);
+            return true;
+        }
+        return false;
+    }
+
     // During formula edit mode, block FocusOut from closing the editor
-    // (user is clicking on the grid to select cell references)
     if (m_formulaEditMode && event->type() == QEvent::FocusOut) {
-        return true;  // consume the event, keep editor open
+        return true;
     }
 
     if (event->type() == QEvent::KeyPress) {
         QKeyEvent* keyEvent = static_cast<QKeyEvent*>(event);
         QLineEdit* editor = qobject_cast<QLineEdit*>(object);
 
-        // Handle popup keyboard navigation
-        if (editor) {
-            auto* popup = qobject_cast<QListWidget*>(
-                editor->property("_formulaPopup").value<QObject*>());
-            if (popup && popup->isVisible()) {
-                if (keyEvent->key() == Qt::Key_Down) {
-                    int next = popup->currentRow() + 1;
-                    if (next < popup->count()) popup->setCurrentRow(next);
-                    return true;
-                }
-                if (keyEvent->key() == Qt::Key_Up) {
-                    int prev = popup->currentRow() - 1;
-                    if (prev >= 0) popup->setCurrentRow(prev);
-                    return true;
-                }
-                if (keyEvent->key() == Qt::Key_Return || keyEvent->key() == Qt::Key_Enter ||
-                    keyEvent->key() == Qt::Key_Tab) {
-                    auto* item = popup->currentItem();
-                    if (item) {
-                        QString funcName = item->data(Qt::UserRole).toString();
-                        popup->hide();
-                        QString text = editor->text();
-                        QString token = extractCurrentToken(text);
-                        if (!token.isEmpty()) {
-                            int tokenStart = text.length() - token.length();
-                            editor->setText(text.left(tokenStart) + funcName + "(");
-                            editor->setCursorPosition(editor->text().length());
-                        }
-                    }
-                    return true;
-                }
-                if (keyEvent->key() == Qt::Key_Escape) {
-                    popup->hide();
-                    return true;
-                }
-            }
+        // Esc: cancel edit and revert value
+        if (keyEvent->key() == Qt::Key_Escape && editor) {
+            hideAllPopups(editor);
+            m_formulaEditMode = false;
+            emit formulaEditModeChanged(false);
+            emit closeEditor(editor, QAbstractItemDelegate::RevertModelCache);
+            return true;
         }
 
         // Arrow keys during editing: commit and move (like Excel)
@@ -128,6 +182,20 @@ bool CellDelegate::eventFilter(QObject* object, QEvent* event) {
 
 QWidget* CellDelegate::createEditor(QWidget* parent, const QStyleOptionViewItem& option,
                                    const QModelIndex& index) const {
+    // Checkbox cells: no editor — toggle is handled in SpreadsheetView::mousePressEvent
+    if (m_spreadsheetView) {
+        auto spreadsheet = m_spreadsheetView->getSpreadsheet();
+        if (spreadsheet) {
+            auto cell = spreadsheet->getCellIfExists(index.row(), index.column());
+            if (cell) {
+                const auto& style = cell->getStyle();
+                if (style.numberFormat == "Checkbox") return nullptr;
+                // Picklist cells: handled by SpreadsheetView popup
+                if (style.numberFormat == "Picklist") return nullptr;
+            }
+        }
+    }
+
     QLineEdit* editor = new QLineEdit(parent);
     editor->setFrame(false);
     editor->setStyleSheet(
@@ -140,12 +208,15 @@ QWidget* CellDelegate::createEditor(QWidget* parent, const QStyleOptionViewItem&
     popup->setAttribute(Qt::WA_ShowWithoutActivating);
     popup->setFocusPolicy(Qt::NoFocus);
     popup->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    popup->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     popup->setStyleSheet(
-        "QListWidget { background: white; border: 1px solid #C8C8C8; font-size: 12px; outline: none; }"
-        "QListWidget::item { padding: 4px 8px; border: none; }"
-        "QListWidget::item:selected { background: #E8F0FE; }"
+        "QListWidget { background: white; border: 1px solid #C0C0C0; outline: none; "
+        "border-radius: 6px; }"
+        "QListWidget::item { padding: 0px; border: none; }"
+        "QListWidget::item:selected { background: transparent; }"
+        "QListWidget::item:hover { background: transparent; }"
     );
-    popup->setIconSize(QSize(0, 0));
+    popup->setItemDelegate(new FormulaPopupDelegate(popup));
     popup->hide();
 
     // --- Parameter hint tooltip ---
@@ -158,62 +229,62 @@ QWidget* CellDelegate::createEditor(QWidget* parent, const QStyleOptionViewItem&
     paramHint->setTextFormat(Qt::RichText);
     paramHint->hide();
 
-    // Populate popup items from registry
+    // --- Detail panel (shown on click) ---
+    auto* detailPanel = new QLabel(parent->window());
+    detailPanel->setWindowFlags(Qt::ToolTip | Qt::FramelessWindowHint);
+    detailPanel->setAttribute(Qt::WA_ShowWithoutActivating);
+    detailPanel->setStyleSheet(
+        "QLabel { background: white; border: 1px solid #D0D0D0; padding: 12px; "
+        "border-radius: 6px; }");
+    detailPanel->setTextFormat(Qt::RichText);
+    detailPanel->setWordWrap(true);
+    detailPanel->setFixedWidth(340);
+    detailPanel->hide();
+
+    // Populate popup items from registry (startsWith filter)
     auto populatePopup = [popup](const QString& prefix) {
         popup->clear();
         const auto& reg = formulaRegistry();
-        QString upper = prefix.toUpper();
         for (auto it = reg.begin(); it != reg.end(); ++it) {
-            if (it->name.contains(upper, Qt::CaseInsensitive)) {
+            if (it->name.startsWith(prefix, Qt::CaseInsensitive)) {
                 auto* item = new QListWidgetItem(popup);
-                // Store function name in UserRole for retrieval
-                item->setData(Qt::UserRole, it->name);
-                // Rich text display: bold name + gray description
-                QString display = it->name;
-                // Pad to align descriptions
-                while (display.length() < 14) display += ' ';
-                item->setText(display + it->description);
-
-                // Custom font: name bold, rest normal
-                QFont f = popup->font();
-                f.setPointSize(11);
-                item->setFont(f);
+                item->setData(FuncNameRole, it->name);
+                item->setData(FuncDescRole, it->description);
             }
         }
         return popup->count() > 0;
     };
 
-    // Insert selected function into editor
-    auto insertFunction = [editor, popup, paramHint](const QString& funcName) {
-        popup->hide();
-        QString text = editor->text();
-        // Find the start of the token we're replacing
-        QString token = extractCurrentToken(text);
-        if (!token.isEmpty()) {
-            int tokenStart = text.length() - token.length();
-            editor->setText(text.left(tokenStart) + funcName + "(");
-            editor->setCursorPosition(editor->text().length());
-        }
-        editor->setFocus();
-    };
-
-    // When item clicked in popup
+    // When item clicked in popup → show detail panel
     QObject::connect(popup, &QListWidget::itemClicked, editor,
-        [insertFunction](QListWidgetItem* item) {
-            insertFunction(item->data(Qt::UserRole).toString());
+        [popup, detailPanel](QListWidgetItem* item) {
+            QString funcName = item->data(FuncNameRole).toString();
+            const auto& reg = formulaRegistry();
+            if (reg.contains(funcName)) {
+                detailPanel->setText(buildDetailHtml(reg[funcName]));
+                detailPanel->adjustSize();
+                // Position to the right of popup
+                QPoint pos = popup->mapToGlobal(QPoint(popup->width() + 4, 0));
+                detailPanel->move(pos);
+                detailPanel->show();
+            }
         });
 
-    // Handle keyboard in editor for popup navigation
+    // Install event filter on popup (to forward keys to editor) and on editor
+    popup->installEventFilter(const_cast<CellDelegate*>(this));
+    popup->setProperty("_editor", QVariant::fromValue(static_cast<QObject*>(editor)));
     editor->installEventFilter(const_cast<CellDelegate*>(this));
 
-    // Store popup and paramHint on editor for access in eventFilter
+    // Store widgets on editor for access in eventFilter
     editor->setProperty("_formulaPopup", QVariant::fromValue(static_cast<QObject*>(popup)));
     editor->setProperty("_paramHint", QVariant::fromValue(static_cast<QObject*>(paramHint)));
+    editor->setProperty("_detailPanel", QVariant::fromValue(static_cast<QObject*>(detailPanel)));
 
     // Show popup / param hint on text change
     QObject::connect(editor, &QLineEdit::textChanged, editor,
-        [this, editor, popup, paramHint, populatePopup, insertFunction](const QString& text) {
+        [this, editor, popup, paramHint, detailPanel, populatePopup](const QString& text) {
         emit formulaEditModeChanged(text.startsWith("="));
+        detailPanel->hide(); // hide detail panel on any text change
 
         if (text.startsWith("=") && text.length() > 1) {
             QString token = extractCurrentToken(text);
@@ -221,14 +292,27 @@ QWidget* CellDelegate::createEditor(QWidget* parent, const QStyleOptionViewItem&
             // Show autocomplete if typing a function name token
             if (!token.isEmpty() && token[0].isLetter()) {
                 if (populatePopup(token)) {
-                    // Position below the editor
-                    QPoint pos = editor->mapToGlobal(QPoint(0, editor->height()));
-                    popup->setFixedWidth(qMax(380, editor->width()));
-                    int visibleItems = qMin(popup->count(), 8);
-                    popup->setFixedHeight(visibleItems * 26 + 4);
-                    popup->move(pos);
-                    popup->show();
                     popup->setCurrentRow(0);
+                    // Defer positioning to next event loop — editor geometry
+                    // may not be finalized on the very first keystroke
+                    QTimer::singleShot(0, editor, [editor, popup]() {
+                        if (!editor || !popup) return;
+                        int popupW = qMax(460, editor->width());
+                        int visibleItems = qMin(popup->count(), 8);
+                        int popupH = visibleItems * 30 + 6;
+                        popup->setFixedWidth(popupW);
+                        popup->setFixedHeight(popupH);
+                        int edH = qMax(editor->height(), 25);
+                        QPoint below = editor->mapToGlobal(QPoint(0, edH + 2));
+                        QPoint above = editor->mapToGlobal(QPoint(0, -popupH - 2));
+                        QScreen* screen = editor->screen();
+                        if (screen && below.y() + popupH > screen->availableGeometry().bottom()) {
+                            popup->move(above);
+                        } else {
+                            popup->move(below);
+                        }
+                        popup->show();
+                    });
                 } else {
                     popup->hide();
                 }
@@ -244,13 +328,19 @@ QWidget* CellDelegate::createEditor(QWidget* parent, const QStyleOptionViewItem&
                 const auto& info = reg[ctx.funcName];
                 paramHint->setText(buildParamHintHtml(info, ctx.paramIndex));
                 paramHint->adjustSize();
-                QPoint hintPos = editor->mapToGlobal(QPoint(0, editor->height() + 2));
-                // If popup is visible, place hint below it
-                if (popup->isVisible()) {
-                    hintPos.setY(popup->mapToGlobal(QPoint(0, popup->height())).y() + 2);
-                }
-                paramHint->move(hintPos);
-                paramHint->show();
+                // Defer positioning to next event loop
+                QTimer::singleShot(0, editor, [editor, popup, paramHint]() {
+                    if (!editor || !paramHint) return;
+                    QPoint hintPos;
+                    if (popup && popup->isVisible()) {
+                        hintPos = popup->mapToGlobal(QPoint(0, popup->height() + 2));
+                    } else {
+                        int edH = qMax(editor->height(), 25);
+                        hintPos = editor->mapToGlobal(QPoint(0, edH + 2));
+                    }
+                    paramHint->move(hintPos);
+                    paramHint->show();
+                });
             } else {
                 paramHint->hide();
             }
@@ -271,9 +361,12 @@ QWidget* CellDelegate::createEditor(QWidget* parent, const QStyleOptionViewItem&
             const auto& info = reg[ctx.funcName];
             paramHint->setText(buildParamHintHtml(info, ctx.paramIndex));
             paramHint->adjustSize();
-            QPoint hintPos = editor->mapToGlobal(QPoint(0, editor->height() + 2));
-            if (popup->isVisible()) {
-                hintPos.setY(popup->mapToGlobal(QPoint(0, popup->height())).y() + 2);
+            QPoint hintPos;
+            if (popup && popup->isVisible()) {
+                hintPos = popup->mapToGlobal(QPoint(0, popup->height() + 2));
+            } else {
+                int edH = qMax(editor->height(), 25);
+                hintPos = editor->mapToGlobal(QPoint(0, edH + 2));
             }
             paramHint->move(hintPos);
             paramHint->show();
@@ -282,9 +375,19 @@ QWidget* CellDelegate::createEditor(QWidget* parent, const QStyleOptionViewItem&
         }
     });
 
-    // Clean up on editor destruction
-    QObject::connect(editor, &QObject::destroyed, popup, &QObject::deleteLater);
-    QObject::connect(editor, &QObject::destroyed, paramHint, &QObject::deleteLater);
+    // Clean up on editor destruction — hide immediately, then delete
+    QObject::connect(editor, &QObject::destroyed, popup, [popup]() {
+        popup->hide();
+        popup->deleteLater();
+    });
+    QObject::connect(editor, &QObject::destroyed, paramHint, [paramHint]() {
+        paramHint->hide();
+        paramHint->deleteLater();
+    });
+    QObject::connect(editor, &QObject::destroyed, detailPanel, [detailPanel]() {
+        detailPanel->hide();
+        detailPanel->deleteLater();
+    });
 
     return editor;
 }
@@ -352,9 +455,38 @@ void CellDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option,
         }
     }
 
+    // --- Picklist / Checkbox rendering ---
+    bool skipText = false;
+    if (m_spreadsheetView) {
+        auto spreadsheet = m_spreadsheetView->getSpreadsheet();
+        if (spreadsheet) {
+            auto cell = spreadsheet->getCellIfExists(index.row(), index.column());
+            if (cell) {
+                const auto& style = cell->getStyle();
+                if (style.numberFormat == "Checkbox") {
+                    bool checked = false;
+                    auto val = cell->getValue();
+                    if (val.typeId() == QMetaType::Bool) checked = val.toBool();
+                    else {
+                        QString s = val.toString().toLower();
+                        checked = (s == "true" || s == "1");
+                    }
+                    drawCheckbox(painter, rect, checked);
+                    skipText = true;
+                } else if (style.numberFormat == "Picklist") {
+                    QString val = cell->getValue().toString();
+                    const auto* rule = spreadsheet->getValidationAt(index.row(), index.column());
+                    QStringList options = rule ? rule->listItems : QStringList();
+                    drawPicklistTags(painter, rect, val, options);
+                    skipText = true;
+                }
+            }
+        }
+    }
+
     // --- Text ---
     QString text = index.data(Qt::DisplayRole).toString();
-    if (!text.isEmpty()) {
+    if (!skipText && !text.isEmpty()) {
         QFont font = option.font;
         QVariant fontData = index.data(Qt::FontRole);
         if (fontData.isValid()) {
@@ -448,8 +580,12 @@ void CellDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option,
         if (parts.size() >= 2) {
             int w = parts[0].toInt();
             QColor c(parts[1]);
+            int ps = (parts.size() >= 3) ? parts[2].toInt() : 0;
             if (c.isValid() && w > 0) {
-                painter->setPen(QPen(c, w, Qt::SolidLine));
+                Qt::PenStyle penStyle = Qt::SolidLine;
+                if (ps == 1) penStyle = Qt::DashLine;
+                else if (ps == 2) penStyle = Qt::DotLine;
+                painter->setPen(QPen(c, w, penStyle));
                 painter->drawLine(x1, y1, x2, y2);
             }
         }
@@ -554,4 +690,108 @@ void CellDelegate::drawSparkline(QPainter* painter, const QRect& rect,
             break;
         }
     }
+}
+
+void CellDelegate::drawCheckbox(QPainter* painter, const QRect& rect, bool checked) const {
+    int boxSize = 14;
+    int x = rect.left() + (rect.width() - boxSize) / 2;
+    int y = rect.top() + (rect.height() - boxSize) / 2;
+    QRectF boxRect(x + 0.5, y + 0.5, boxSize - 1, boxSize - 1);
+
+    painter->setRenderHint(QPainter::Antialiasing, true);
+    if (checked) {
+        // Soft green filled rounded rect
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(QColor("#34A853"));
+        painter->drawRoundedRect(boxRect, 4, 4);
+        // Smooth checkmark
+        QPainterPath check;
+        check.moveTo(x + 3.5, y + 7);
+        check.lineTo(x + 6, y + 10);
+        check.lineTo(x + 10.5, y + 4.5);
+        painter->setPen(QPen(Qt::white, 1.6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        painter->setBrush(Qt::NoBrush);
+        painter->drawPath(check);
+    } else {
+        // Soft outlined rounded rect
+        painter->setPen(QPen(QColor("#C4C7CC"), 1.2));
+        painter->setBrush(QColor("#FAFAFA"));
+        painter->drawRoundedRect(boxRect, 4, 4);
+    }
+    painter->setRenderHint(QPainter::Antialiasing, false);
+}
+
+void CellDelegate::drawPicklistTags(QPainter* painter, const QRect& rect,
+                                     const QString& value, const QStringList& allOptions) const {
+    painter->setRenderHint(QPainter::Antialiasing, true);
+
+    // Draw a subtle dropdown arrow on the right
+    {
+        int arrowSize = 6;
+        int arrowX = rect.right() - arrowSize - 6;
+        int arrowY = rect.top() + (rect.height() - arrowSize / 2) / 2;
+        QPainterPath arrow;
+        arrow.moveTo(arrowX, arrowY);
+        arrow.lineTo(arrowX + arrowSize, arrowY);
+        arrow.lineTo(arrowX + arrowSize / 2.0, arrowY + arrowSize * 0.55);
+        arrow.closeSubpath();
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(QColor("#B0B4BA"));
+        painter->drawPath(arrow);
+    }
+
+    if (value.isEmpty()) {
+        painter->setRenderHint(QPainter::Antialiasing, false);
+        return;
+    }
+
+    QStringList selected = value.split('|', Qt::SkipEmptyParts);
+
+    QFont tagFont(painter->font().family(), 10);
+    tagFont.setWeight(QFont::Medium);
+    tagFont.setLetterSpacing(QFont::AbsoluteSpacing, 0.2);
+    QFontMetrics fm(tagFont);
+    painter->setFont(tagFont);
+
+    int x = rect.left() + 5;
+    int tagH = 18;
+    int y = rect.top() + (rect.height() - tagH) / 2;
+    int gap = 3;
+    int maxX = rect.right() - 18; // leave room for dropdown arrow
+
+    for (const QString& item : selected) {
+        QString trimmed = item.trimmed();
+        if (trimmed.isEmpty()) continue;
+
+        int colorIdx = allOptions.indexOf(trimmed);
+        if (colorIdx < 0) colorIdx = static_cast<int>(qHash(trimmed) % TAG_COLOR_COUNT);
+
+        QColor bg = tagBgColor(colorIdx);
+        QColor fg = tagTextColor(colorIdx);
+
+        int textW = fm.horizontalAdvance(trimmed);
+        int tagW = textW + 14;
+
+        if (x + tagW > maxX) {
+            // Draw overflow indicator "..."
+            painter->setPen(QColor("#9CA3AF"));
+            QFont smallFont(painter->font());
+            smallFont.setPointSize(8);
+            painter->setFont(smallFont);
+            painter->drawText(QRectF(x, y, 20, tagH), Qt::AlignVCenter | Qt::AlignLeft, "...");
+            break;
+        }
+
+        QRectF tagRect(x, y, tagW, tagH);
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(bg);
+        painter->drawRoundedRect(tagRect, tagH / 2.0, tagH / 2.0);
+
+        painter->setPen(fg);
+        painter->drawText(tagRect, Qt::AlignCenter, trimmed);
+
+        x += tagW + gap;
+    }
+
+    painter->setRenderHint(QPainter::Antialiasing, false);
 }

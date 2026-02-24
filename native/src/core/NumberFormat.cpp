@@ -40,6 +40,8 @@ NumberFormatType NumberFormat::typeFromString(const QString& str) {
     if (lower == "percentage") return NumberFormatType::Percentage;
     if (lower == "date") return NumberFormatType::Date;
     if (lower == "time") return NumberFormatType::Time;
+    if (lower == "fraction") return NumberFormatType::Fraction;
+    if (lower == "scientific") return NumberFormatType::Scientific;
     if (lower == "text") return NumberFormatType::Text;
     if (lower == "custom") return NumberFormatType::Custom;
     return NumberFormatType::General;
@@ -53,6 +55,8 @@ QString NumberFormat::typeToString(NumberFormatType type) {
         case NumberFormatType::Percentage: return "Percentage";
         case NumberFormatType::Date: return "Date";
         case NumberFormatType::Time: return "Time";
+        case NumberFormatType::Fraction: return "Fraction";
+        case NumberFormatType::Scientific: return "Scientific";
         case NumberFormatType::Text: return "Text";
         case NumberFormatType::Custom: return "Custom";
         default: return "General";
@@ -135,19 +139,31 @@ QString NumberFormat::format(const QString& value, const NumberFormatOptions& op
             QDate date = parseDate(value);
             if (!date.isValid()) return value;
 
-            if (options.dateFormatId == "yyyy-mm-dd" || options.dateFormatId == "yyyy-MM-dd")
+            QString fid = options.dateFormatId;
+            // New format IDs from dropdown
+            if (fid == "d/M/yy") return date.toString("d/M/yy");
+            if (fid == "d MMM, yyyy") return date.toString("d MMM, yyyy");
+            if (fid == "d MMMM, yyyy") return date.toString("d MMMM, yyyy");
+            if (fid == "EEEE, d MMMM, yyyy") return date.toString("dddd, d MMMM, yyyy");
+            if (fid == "dd/MM/yyyy") return date.toString("dd/MM/yyyy");
+            if (fid == "MM/dd/yyyy") return date.toString("MM/dd/yyyy");
+            if (fid == "yyyy/MM/dd") return date.toString("yyyy/MM/dd");
+            // Legacy format IDs
+            if (fid == "yyyy-mm-dd" || fid == "yyyy-MM-dd")
                 return date.toString("yyyy-MM-dd");
-            if (options.dateFormatId == "dd/mm/yyyy" || options.dateFormatId == "dd/MM/yyyy")
+            if (fid == "dd/mm/yyyy")
                 return date.toString("dd/MM/yyyy");
-            if (options.dateFormatId == "mmm d, yyyy")
+            if (fid == "mmm d, yyyy")
                 return date.toString("MMM d, yyyy");
-            if (options.dateFormatId == "mmmm d, yyyy")
+            if (fid == "mmmm d, yyyy")
                 return date.toString("MMMM d, yyyy");
-            if (options.dateFormatId == "d-mmm-yy")
+            if (fid == "d-mmm-yy")
                 return date.toString("d-MMM-yy");
-            if (options.dateFormatId == "mm/dd")
+            if (fid == "mm/dd")
                 return date.toString("MM/dd");
-            // Default: mm/dd/yyyy
+            if (fid == "mm/dd/yyyy")
+                return date.toString("MM/dd/yyyy");
+            // Default
             return date.toString("MM/dd/yyyy");
         }
 
@@ -166,6 +182,34 @@ QString NumberFormat::format(const QString& value, const NumberFormatOptions& op
             QTime time = QTime::fromString(value);
             if (time.isValid()) return time.toString("hh:mm:ss AP");
             return value;
+        }
+
+        case NumberFormatType::Scientific: {
+            if (!ok) return value;
+            return QString::number(num, 'E', options.decimalPlaces);
+        }
+
+        case NumberFormatType::Fraction: {
+            if (!ok) return value;
+            int whole = static_cast<int>(num);
+            double frac = std::abs(num - whole);
+            if (frac < 0.0001) return QString::number(whole);
+            // Simple fraction approximation (denominator up to 100)
+            int bestNum = 0, bestDen = 1;
+            double bestErr = 1.0;
+            for (int den = 1; den <= 100; ++den) {
+                int num_ = static_cast<int>(std::round(frac * den));
+                double err = std::abs(frac - static_cast<double>(num_) / den);
+                if (err < bestErr) {
+                    bestErr = err;
+                    bestNum = num_;
+                    bestDen = den;
+                }
+                if (bestErr < 0.0001) break;
+            }
+            if (bestNum == 0) return QString::number(whole);
+            if (whole == 0) return QString("%1/%2").arg(num < 0 ? -bestNum : bestNum).arg(bestDen);
+            return QString("%1 %2/%3").arg(whole).arg(bestNum).arg(bestDen);
         }
 
         case NumberFormatType::Custom: {

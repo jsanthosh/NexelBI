@@ -11,6 +11,8 @@ enum class NumberFormatType {
     Percentage,
     Date,
     Time,
+    Fraction,
+    Scientific,
     Text,
     Custom
 };
