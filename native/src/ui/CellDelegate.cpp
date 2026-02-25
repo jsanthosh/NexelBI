@@ -479,7 +479,13 @@ void CellDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option,
                     QString val = cell->getValue().toString();
                     const auto* rule = spreadsheet->getValidationAt(index.row(), index.column());
                     QStringList options = rule ? rule->listItems : QStringList();
-                    drawPicklistTags(painter, rect, val, options);
+                    QStringList colors = rule ? rule->listItemColors : QStringList();
+                    // Read alignment from model
+                    Qt::Alignment align = Qt::AlignLeft | Qt::AlignVCenter;
+                    QVariant alignVar = index.data(Qt::TextAlignmentRole);
+                    if (alignVar.isValid())
+                        align = Qt::Alignment(alignVar.toInt());
+                    drawPicklistTags(painter, rect, val, options, colors, align);
                     skipText = true;
                 }
             }
@@ -724,7 +730,9 @@ void CellDelegate::drawCheckbox(QPainter* painter, const QRect& rect, bool check
 }
 
 void CellDelegate::drawPicklistTags(QPainter* painter, const QRect& rect,
-                                     const QString& value, const QStringList& allOptions) const {
+                                     const QString& value, const QStringList& allOptions,
+                                     const QStringList& optionColors,
+                                     Qt::Alignment alignment) const {
     painter->setRenderHint(QPainter::Antialiasing, true);
 
     // Draw a subtle dropdown arrow on the right
@@ -755,11 +763,33 @@ void CellDelegate::drawPicklistTags(QPainter* painter, const QRect& rect,
     QFontMetrics fm(tagFont);
     painter->setFont(tagFont);
 
-    int x = rect.left() + 5;
     int tagH = 18;
-    int y = rect.top() + (rect.height() - tagH) / 2;
     int gap = 3;
     int maxX = rect.right() - 18; // leave room for dropdown arrow
+
+    // Compute total width for horizontal alignment
+    int totalTagW = 0;
+    for (const QString& item : selected) {
+        QString trimmed = item.trimmed();
+        if (!trimmed.isEmpty())
+            totalTagW += fm.horizontalAdvance(trimmed) + 14 + gap;
+    }
+    if (totalTagW > 0) totalTagW -= gap;
+
+    int availW = maxX - rect.left() - 5;
+    int x = rect.left() + 5;
+    if (alignment & Qt::AlignHCenter)
+        x = rect.left() + 5 + qMax(0, (availW - totalTagW) / 2);
+    else if (alignment & Qt::AlignRight)
+        x = rect.left() + 5 + qMax(0, availW - totalTagW);
+
+    int y;
+    if (alignment & Qt::AlignTop)
+        y = rect.top() + 2;
+    else if (alignment & Qt::AlignBottom)
+        y = rect.bottom() - tagH - 2;
+    else
+        y = rect.top() + (rect.height() - tagH) / 2;
 
     for (const QString& item : selected) {
         QString trimmed = item.trimmed();
@@ -768,8 +798,16 @@ void CellDelegate::drawPicklistTags(QPainter* painter, const QRect& rect,
         int colorIdx = allOptions.indexOf(trimmed);
         if (colorIdx < 0) colorIdx = static_cast<int>(qHash(trimmed) % TAG_COLOR_COUNT);
 
-        QColor bg = tagBgColor(colorIdx);
-        QColor fg = tagTextColor(colorIdx);
+        QColor bg, fg;
+        // Use custom color if provided for this option
+        if (colorIdx >= 0 && colorIdx < optionColors.size() && !optionColors[colorIdx].isEmpty()) {
+            bg = QColor(optionColors[colorIdx]);
+            // Compute readable text color: dark text on light bg, white on dark bg
+            fg = (bg.lightness() > 140) ? bg.darker(300) : QColor(Qt::white);
+        } else {
+            bg = tagBgColor(colorIdx);
+            fg = tagTextColor(colorIdx);
+        }
 
         int textW = fm.horizontalAdvance(trimmed);
         int tagW = textW + 14;

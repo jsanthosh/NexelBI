@@ -89,6 +89,21 @@ void InsertColumnCommand::undo(Spreadsheet* sheet) {
 }
 void InsertColumnCommand::redo(Spreadsheet* sheet) {
     sheet->insertColumn(m_col, m_count);
+    // Copy formatting from source column to newly inserted column(s)
+    if (m_sourceCol >= 0) {
+        // After insert, source col may have shifted right if inserted before it
+        int srcCol = (m_col <= m_sourceCol) ? m_sourceCol + m_count : m_sourceCol;
+        int maxRow = sheet->getRowCount();
+        for (int r = 0; r < maxRow; ++r) {
+            auto srcCell = sheet->getCellIfExists(r, srcCol);
+            if (srcCell) {
+                const CellStyle& srcStyle = srcCell->getStyle();
+                for (int c = m_col; c < m_col + m_count; ++c) {
+                    sheet->getCell(CellAddress(r, c))->setStyle(srcStyle);
+                }
+            }
+        }
+    }
 }
 
 // DeleteRowCommand

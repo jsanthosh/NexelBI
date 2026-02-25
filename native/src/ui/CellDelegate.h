@@ -44,7 +44,9 @@ private:
     void drawSparkline(QPainter* painter, const QRect& rect, const SparklineRenderData& data) const;
     void drawCheckbox(QPainter* painter, const QRect& rect, bool checked) const;
     void drawPicklistTags(QPainter* painter, const QRect& rect, const QString& value,
-                          const QStringList& allOptions) const;
+                          const QStringList& allOptions,
+                          const QStringList& optionColors = QStringList(),
+                          Qt::Alignment alignment = Qt::AlignLeft | Qt::AlignVCenter) const;
     static QColor tagBgColor(int index);
     static QColor tagTextColor(int index);
 };

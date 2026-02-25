@@ -283,14 +283,22 @@ void ChartWidget::computeAxisRange(double& minVal, double& maxVal, double& step)
         }
     }
 
-    if (minVal == maxVal) {
-        minVal -= 1;
-        maxVal += 1;
-    }
-
     // Line charts: dynamic y-axis from data range (better for showing trends)
     // All other charts: always start at 0 (accurate visual comparison of values)
     bool isLineChart = (m_config.type == ChartType::Line);
+
+    if (minVal == maxVal) {
+        // All values identical — create a sensible range
+        if (minVal >= 0 && !isLineChart) {
+            // Non-line charts with non-negative data: range from 0 to value (or 0-1 if zero)
+            minVal = 0;
+            maxVal = (maxVal == 0) ? 1.0 : maxVal * 1.5;
+        } else {
+            minVal -= 1;
+            maxVal += 1;
+        }
+    }
+
     if (!isLineChart && minVal > 0) {
         minVal = 0;
     }

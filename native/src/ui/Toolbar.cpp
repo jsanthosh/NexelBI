@@ -1071,7 +1071,7 @@ QToolBar* Toolbar::createSecondaryToolbar(QWidget* parent) {
     borderBtn->setStyleSheet(
         "QToolButton { background: transparent; border: 1px solid transparent; border-radius: 4px; padding: 2px 6px; }"
         "QToolButton:hover { background-color: #E8ECF0; border-color: #D0D5DD; }"
-        "QToolButton::menu-button { width: 14px; border-left: 1px solid #D0D5DD; }"
+        "QToolButton::menu-button { width: 10px; border-left: 1px solid #D0D5DD; }"
         "QToolButton::menu-button:hover { background-color: #D8DCE0; }"
     );
 
@@ -1107,7 +1107,7 @@ QToolBar* Toolbar::createSecondaryToolbar(QWidget* parent) {
 
     // Helper: re-open border menu after Line Style / Line Color changes
     auto reopenBorderMenu = [borderMenu, borderBtn]() {
-        QTimer::singleShot(0, borderMenu, [borderMenu, borderBtn]() {
+        QTimer::singleShot(100, borderMenu, [borderMenu, borderBtn]() {
             borderMenu->popup(borderBtn->mapToGlobal(QPoint(0, borderBtn->height())));
         });
     };
@@ -1246,7 +1246,7 @@ QToolBar* Toolbar::createSecondaryToolbar(QWidget* parent) {
         "QToolButton { background: transparent; border: 1px solid transparent; border-radius: 4px; "
         "padding: 2px 5px; font-size: 11px; color: #344054; }"
         "QToolButton:hover { background-color: #E8ECF0; border-color: #D0D5DD; }"
-        "QToolButton::menu-button { width: 13px; border-left: 1px solid #D0D5DD; }"
+        "QToolButton::menu-button { width: 10px; border-left: 1px solid #D0D5DD; }"
         "QToolButton::menu-button:hover { background-color: #D8DCE0; }"
     );
 
@@ -1424,7 +1424,7 @@ QToolBar* Toolbar::createSecondaryToolbar(QWidget* parent) {
     currencyBtn->setStyleSheet(
         "QToolButton { background: transparent; border: 1px solid transparent; border-radius: 4px; padding: 2px 4px; }"
         "QToolButton:hover { background-color: #E8ECF0; border-color: #D0D5DD; }"
-        "QToolButton::menu-button { width: 12px; border-left: 1px solid #D0D5DD; }"
+        "QToolButton::menu-button { width: 10px; border-left: 1px solid #D0D5DD; }"
         "QToolButton::menu-button:hover { background-color: #D8DCE0; }"
     );
     QMenu* quickCurrMenu = new QMenu(currencyBtn);
@@ -1715,21 +1715,45 @@ void Toolbar::updateBgColorIcon() {
     if (!m_bgColorBtn) return;
     m_bgColorBtn->setIcon(createIcon(16, [this](QPainter& p, int) {
         p.setRenderHint(QPainter::Antialiasing, true);
+
+        // Paint bucket body
+        p.setPen(QPen(QColor("#555"), 1.0));
+        p.setBrush(QColor("#F5F5F5"));
+        QPainterPath bucket;
+        bucket.moveTo(3, 3);
+        bucket.lineTo(10, 3);
+        bucket.lineTo(10, 4);
+        bucket.lineTo(11, 4);
+        bucket.lineTo(11, 10);
+        bucket.lineTo(3, 10);
+        bucket.closeSubpath();
+        p.drawPath(bucket);
+
+        // Fill inside bucket with active color
         p.setPen(Qt::NoPen);
-
-        // Paint drop — single clean teardrop in active color
         p.setBrush(m_lastBgColor);
-        QPainterPath drop;
-        drop.moveTo(8, 1);
-        drop.cubicTo(3, 6, 2, 10, 5, 12);
-        drop.cubicTo(6.5, 13, 9.5, 13, 11, 12);
-        drop.cubicTo(14, 10, 13, 6, 8, 1);
-        p.drawPath(drop);
+        p.drawRect(4, 5, 6, 4);
 
-        // Thin outline to keep it visible on white
-        p.setPen(QPen(QColor("#666"), 0.6));
+        // Bucket handle (arc on top)
+        p.setPen(QPen(QColor("#555"), 1.2));
         p.setBrush(Qt::NoBrush);
-        p.drawPath(drop);
+        QPainterPath handle;
+        handle.moveTo(5, 3);
+        handle.quadTo(6.5, 0, 8, 3);
+        p.drawPath(handle);
+
+        // Paint pour (drip on right side)
+        p.setPen(Qt::NoPen);
+        p.setBrush(m_lastBgColor);
+        QPainterPath pour;
+        pour.moveTo(11, 6);
+        pour.quadTo(15, 7, 14, 10);
+        pour.quadTo(13, 12, 12, 10);
+        pour.quadTo(12, 8, 11, 6);
+        p.drawPath(pour);
+        p.setPen(QPen(QColor("#555"), 0.6));
+        p.setBrush(Qt::NoBrush);
+        p.drawPath(pour);
 
         // Color bar at bottom
         p.setRenderHint(QPainter::Antialiasing, false);

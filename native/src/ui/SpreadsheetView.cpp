@@ -28,6 +28,7 @@
 #include <QAbstractButton>
 #include <QScrollBar>
 #include <QTextEdit>
+#include <QColorDialog>
 #include <algorithm>
 
 SpreadsheetView::SpreadsheetView(QWidget* parent)
@@ -63,6 +64,18 @@ void SpreadsheetView::setSpreadsheet(std::shared_ptr<Spreadsheet> spreadsheet) {
     }
     m_model = new SpreadsheetModel(m_spreadsheet, this);
     setModel(m_model);
+
+    // Clear all old spans and re-apply from the new spreadsheet's merged regions
+    clearSpans();
+    if (m_spreadsheet) {
+        for (const auto& mr : m_spreadsheet->getMergedRegions()) {
+            int r0 = mr.range.getStart().row;
+            int c0 = mr.range.getStart().col;
+            int rowSpan = mr.range.getEnd().row - r0 + 1;
+            int colSpan = mr.range.getEnd().col - c0 + 1;
+            setSpan(r0, c0, rowSpan, colSpan);
+        }
+    }
 }
 
 std::shared_ptr<Spreadsheet> SpreadsheetView::getSpreadsheet() const {
@@ -210,7 +223,7 @@ void SpreadsheetView::setupHeaderContextMenus() {
         menu.addAction("Insert Column", [this, col]() {
             if (m_spreadsheet) {
                 m_spreadsheet->getUndoManager().execute(
-                    std::make_unique<InsertColumnCommand>(col, 1), m_spreadsheet.get());
+                    std::make_unique<InsertColumnCommand>(col, 1, col), m_spreadsheet.get());
                 refreshView();
             }
         });
@@ -1255,6 +1268,11 @@ void SpreadsheetView::mergeCells() {
     cell->setStyle(style);
 
     if (m_model) m_model->resetModel();
+
+    // Keep focus on the merged cell
+    QModelIndex mergedIdx = m_model->index(minRow, minCol);
+    setCurrentIndex(mergedIdx);
+    selectionModel()->select(mergedIdx, QItemSelectionModel::ClearAndSelect);
 }
 
 void SpreadsheetView::unmergeCells() {
@@ -1498,7 +1516,7 @@ void SpreadsheetView::insertEntireColumn() {
     std::sort(sortedCols.rbegin(), sortedCols.rend());
     for (int col : sortedCols) {
         m_spreadsheet->getUndoManager().execute(
-            std::make_unique<InsertColumnCommand>(col, 1), m_spreadsheet.get());
+            std::make_unique<InsertColumnCommand>(col, 1, col), m_spreadsheet.get());
     }
     refreshView();
 }
@@ -1719,6 +1737,15 @@ void SpreadsheetView::setGridlinesVisible(bool visible) {
         m_delegate->setShowGridlines(visible);
         viewport()->update();
     }
+    // Propagate to freeze overlay delegates
+    auto syncDelegate = [visible](QTableView* v) {
+        if (!v) return;
+        auto* d = qobject_cast<CellDelegate*>(v->itemDelegate());
+        if (d) { d->setShowGridlines(visible); v->viewport()->update(); }
+    };
+    syncDelegate(m_frozenRowView);
+    syncDelegate(m_frozenColView);
+    syncDelegate(m_frozenCornerView);
 }
 
 void SpreadsheetView::refreshView() {
@@ -1748,7 +1775,9 @@ void SpreadsheetView::setFrozenColumn(int col) {
 QTableView* SpreadsheetView::createFreezeOverlay() {
     auto* v = new QTableView(this);
     v->setModel(model());
-    v->setItemDelegate(new CellDelegate(v));
+    auto* delegate = new CellDelegate(v);
+    if (m_delegate) delegate->setShowGridlines(m_delegate->showGridlines());
+    v->setItemDelegate(delegate);
     v->setShowGrid(false);
     v->horizontalHeader()->hide();
     v->verticalHeader()->hide();
@@ -2506,18 +2535,23 @@ void SpreadsheetView::mousePressEvent(QMouseEvent* event) {
                         return;
                     }
                 } else if (fmt == "Picklist" && !m_picklistPopupOpen) {
-                    // Single-click opens picklist with re-entry guard
-                    m_picklistPopupOpen = true;
-                    setCurrentIndex(idx);
-                    QTimer::singleShot(0, this, [this, idx]() {
-                        showPicklistPopup(idx);
-                        // Reset guard after a brief delay to prevent re-open from the same click
-                        QTimer::singleShot(300, this, [this]() {
-                            m_picklistPopupOpen = false;
+                    // Only open picklist when clicking the dropdown arrow area
+                    QRect cellRect = visualRect(idx);
+                    int arrowZoneWidth = 22; // arrow icon + padding
+                    QRect arrowRect(cellRect.right() - arrowZoneWidth, cellRect.top(),
+                                    arrowZoneWidth, cellRect.height());
+                    if (arrowRect.contains(event->pos())) {
+                        m_picklistPopupOpen = true;
+                        setCurrentIndex(idx);
+                        QTimer::singleShot(0, this, [this, idx]() {
+                            showPicklistPopup(idx);
+                            QTimer::singleShot(300, this, [this]() {
+                                m_picklistPopupOpen = false;
+                            });
                         });
-                    });
-                    event->accept();
-                    return;
+                        event->accept();
+                        return;
+                    }
                 }
             }
         }
@@ -3165,6 +3199,7 @@ void SpreadsheetView::showPicklistPopup(const QModelIndex& index) {
         QColor("#FEF3C7"), QColor("#FFE4E6"), QColor("#CFFAFE"), QColor("#FEE2E2"),
         QColor("#F3F4F6"), QColor("#ECFCCB"), QColor("#E0E7FF"), QColor("#FDF2F8")
     };
+    QStringList optionColors = rule ? rule->listItemColors : QStringList();
 
     int row = index.row(), col = index.column();
 
@@ -3183,7 +3218,8 @@ void SpreadsheetView::showPicklistPopup(const QModelIndex& index) {
     // --- Option rows as checkable QPushButtons ---
     QList<QPushButton*> optBtns;
     for (int i = 0; i < options.size(); ++i) {
-        QColor bg = tagBg[i % 12];
+        QColor bg = (i < optionColors.size() && !optionColors[i].isEmpty())
+                     ? QColor(optionColors[i]) : tagBg[i % 12];
         bool isChecked = selectedSet.contains(options[i]);
 
         QPushButton* btn = new QPushButton(popup);
@@ -3311,14 +3347,20 @@ void SpreadsheetView::openPicklistManageDialog(int row, int col) {
         m_spreadsheet->getValidationAt(row, col));
     if (!rule) return;
 
+    static const QColor defaultTagBg[] = {
+        QColor("#DBEAFE"), QColor("#FCE7F3"), QColor("#EDE9FE"), QColor("#D1FAE5"),
+        QColor("#FEF3C7"), QColor("#FFE4E6"), QColor("#CFFAFE"), QColor("#FEE2E2"),
+        QColor("#F3F4F6"), QColor("#ECFCCB"), QColor("#E0E7FF"), QColor("#FDF2F8")
+    };
+
     QDialog dlg(this);
     dlg.setWindowTitle("Manage Picklist");
-    dlg.setFixedWidth(360);
+    dlg.setFixedWidth(400);
     dlg.setStyleSheet(
         "QDialog { background: white; }"
-        "QTextEdit { border: 1px solid #D1D5DB; border-radius: 8px; padding: 10px; "
-        "font-size: 13px; color: #1F2937; selection-background-color: #DBEAFE; }"
-        "QTextEdit:focus { border-color: #2563EB; }");
+        "QLineEdit { border: 1px solid #D1D5DB; border-radius: 6px; padding: 6px 8px; "
+        "font-size: 13px; color: #1F2937; }"
+        "QLineEdit:focus { border-color: #2563EB; }");
 
     QVBoxLayout* lo = new QVBoxLayout(&dlg);
     lo->setContentsMargins(20, 20, 20, 20);
@@ -3328,15 +3370,106 @@ void SpreadsheetView::openPicklistManageDialog(int row, int col) {
     title->setStyleSheet("QLabel { font-size: 15px; font-weight: 600; color: #111827; }");
     lo->addWidget(title);
 
-    QLabel* sub = new QLabel("Enter one option per line:", &dlg);
+    QLabel* sub = new QLabel("Set label and color for each option:", &dlg);
     sub->setStyleSheet("QLabel { font-size: 12px; color: #6B7280; }");
     lo->addWidget(sub);
 
-    QTextEdit* editor = new QTextEdit(&dlg);
-    editor->setPlainText(rule->listItems.join('\n'));
-    editor->setMinimumHeight(180);
-    editor->setTabChangesFocus(true);
-    lo->addWidget(editor);
+    // Scrollable list of option rows
+    QScrollArea* scroll = new QScrollArea(&dlg);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setMinimumHeight(200);
+    scroll->setStyleSheet("QScrollArea { background: transparent; border: none; }");
+
+    QWidget* listWidget = new QWidget(scroll);
+    QVBoxLayout* listLo = new QVBoxLayout(listWidget);
+    listLo->setContentsMargins(0, 0, 0, 0);
+    listLo->setSpacing(6);
+
+    struct OptionRow { QLineEdit* text; QPushButton* colorBtn; QString color; };
+    auto optionRows = std::make_shared<QList<OptionRow>>();
+
+    // Ensure listItemColors is same size as listItems
+    while (rule->listItemColors.size() < rule->listItems.size())
+        rule->listItemColors.append("");
+
+    auto addOptionRow = [&](const QString& text, const QString& colorStr, int idx) {
+        QHBoxLayout* rowLo = new QHBoxLayout();
+        rowLo->setSpacing(8);
+
+        QLineEdit* lineEdit = new QLineEdit(text, listWidget);
+        lineEdit->setPlaceholderText("Option name...");
+        rowLo->addWidget(lineEdit, 1);
+
+        // Color button
+        QPushButton* colorBtn = new QPushButton(listWidget);
+        colorBtn->setFixedSize(28, 28);
+        colorBtn->setCursor(Qt::PointingHandCursor);
+        QColor displayColor = colorStr.isEmpty() ? defaultTagBg[idx % 12] : QColor(colorStr);
+        colorBtn->setStyleSheet(QString(
+            "QPushButton { background: %1; border: 1px solid #D1D5DB; border-radius: 6px; }"
+            "QPushButton:hover { border-color: #2563EB; }").arg(displayColor.name()));
+        rowLo->addWidget(colorBtn);
+
+        // Remove button
+        QPushButton* removeBtn = new QPushButton(QString::fromUtf8("\u2715"), listWidget);
+        removeBtn->setFixedSize(24, 24);
+        removeBtn->setCursor(Qt::PointingHandCursor);
+        removeBtn->setStyleSheet(
+            "QPushButton { background: transparent; border: none; color: #9CA3AF; font-size: 13px; }"
+            "QPushButton:hover { color: #EF4444; }");
+        rowLo->addWidget(removeBtn);
+
+        listLo->addLayout(rowLo);
+
+        OptionRow opt{lineEdit, colorBtn, colorStr};
+        optionRows->append(opt);
+        int rowIdx = optionRows->size() - 1;
+
+        // Color picker click
+        QObject::connect(colorBtn, &QPushButton::clicked, &dlg, [optionRows, colorBtn, rowIdx, &dlg]() {
+            QColor cur = (*optionRows)[rowIdx].color.isEmpty()
+                ? colorBtn->palette().button().color() : QColor((*optionRows)[rowIdx].color);
+            QColor picked = QColorDialog::getColor(cur, &dlg, "Option Color");
+            if (picked.isValid()) {
+                (*optionRows)[rowIdx].color = picked.name();
+                colorBtn->setStyleSheet(QString(
+                    "QPushButton { background: %1; border: 1px solid #D1D5DB; border-radius: 6px; }"
+                    "QPushButton:hover { border-color: #2563EB; }").arg(picked.name()));
+            }
+        });
+
+        // Remove click
+        QObject::connect(removeBtn, &QPushButton::clicked, &dlg, [optionRows, rowIdx, rowLo, lineEdit, colorBtn, removeBtn]() {
+            lineEdit->hide(); colorBtn->hide(); removeBtn->hide();
+            // Mark as removed by clearing text
+            (*optionRows)[rowIdx].text = nullptr;
+        });
+    };
+
+    for (int i = 0; i < rule->listItems.size(); ++i) {
+        QString colorStr = (i < rule->listItemColors.size()) ? rule->listItemColors[i] : "";
+        addOptionRow(rule->listItems[i], colorStr, i);
+    }
+
+    listLo->addStretch();
+    scroll->setWidget(listWidget);
+    lo->addWidget(scroll, 1);
+
+    // Add option button
+    QPushButton* addBtn = new QPushButton("+ Add Option", &dlg);
+    addBtn->setCursor(Qt::PointingHandCursor);
+    addBtn->setFixedHeight(30);
+    addBtn->setStyleSheet(
+        "QPushButton { background: transparent; color: #2563EB; border: 1px dashed #93C5FD; "
+        "border-radius: 6px; font-size: 12px; font-weight: 500; }"
+        "QPushButton:hover { background: #EFF6FF; }");
+    lo->addWidget(addBtn);
+    connect(addBtn, &QPushButton::clicked, &dlg, [&, addOptionRow]() {
+        int idx = optionRows->size();
+        addOptionRow("", "", idx);
+        listWidget->adjustSize();
+    });
 
     lo->addSpacing(4);
     QHBoxLayout* btnRow = new QHBoxLayout();
@@ -3366,11 +3499,17 @@ void SpreadsheetView::openPicklistManageDialog(int row, int col) {
 
     if (dlg.exec() == QDialog::Accepted) {
         QStringList newOpts;
-        for (const QString& line : editor->toPlainText().split('\n', Qt::SkipEmptyParts)) {
-            QString t = line.trimmed();
-            if (!t.isEmpty()) newOpts.append(t);
+        QStringList newColors;
+        for (const auto& opt : *optionRows) {
+            if (!opt.text) continue; // removed
+            QString t = opt.text->text().trimmed();
+            if (!t.isEmpty()) {
+                newOpts.append(t);
+                newColors.append(opt.color);
+            }
         }
         rule->listItems = newOpts;
+        rule->listItemColors = newColors;
         if (m_model) {
             emit m_model->dataChanged(
                 m_model->index(rule->range.getStart().row, rule->range.getStart().col),

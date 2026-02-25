@@ -79,7 +79,8 @@ private:
 // Insert column(s) — undo deletes, redo inserts
 class InsertColumnCommand : public UndoCommand {
 public:
-    InsertColumnCommand(int col, int count = 1) : m_col(col), m_count(count) {}
+    InsertColumnCommand(int col, int count = 1, int sourceCol = -1)
+        : m_col(col), m_count(count), m_sourceCol(sourceCol) {}
     void undo(Spreadsheet* sheet) override;
     void redo(Spreadsheet* sheet) override;
     QString description() const override { return "Insert Column"; }
@@ -87,6 +88,7 @@ public:
 private:
     int m_col;
     int m_count;
+    int m_sourceCol; // column to copy formatting from (-1 = none)
 };
 
 // Delete row(s) — saves deleted cells for undo restore

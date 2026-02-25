@@ -116,6 +116,7 @@ public:
         QString value1;
         QString value2;
         QStringList listItems;
+        QStringList listItemColors; // per-option background colors (hex), parallel to listItems
         QString customFormula;
         QString inputTitle;
         QString inputMessage;
