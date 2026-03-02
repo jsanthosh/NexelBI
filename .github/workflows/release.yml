@@ -322,14 +322,14 @@ jobs:
             | Windows (64-bit) | `Nexel-${{ github.ref_name }}-Windows-x64.zip` |
             | Linux (64-bit) | `Nexel-${{ github.ref_name }}-Linux-x86_64.AppImage` |
 
-            ### What's New in v5.0.0
+            ### What's New in v5.1.0
+            - **10M+ Row Performance**: Lazy range evaluation and streaming aggregation for formulas like `=SUM(F:F)` on massive datasets
+            - **Formula Engine Optimization**: Single-pass evaluation, formula cell tracking, and incremental nav index updates
+            - **Fast CSV Import**: Optimized bulk import pipeline for 1GB+ files
+            - **Chart Fixes**: Fixed checkbox overlapping in chart dialog, fixed Y-axis starting at -1 for all-zero line charts
+            - **Theme Support**: Claude button now updates color on theme change
             - **Document Themes**: 8 built-in Excel-compatible themes (Office, Blue Warm, Cool, Warm, Green, Marquee, Slipstream, Grayscale)
-            - **Theme Color System**: HSL tint/shade algorithm for theme-aware color strings across cells, charts, and tables
-            - **Theme-Aware Color Picker**: 6×10 grid with tinted theme color swatches in toolbar and Format Cells dialog
-            - **Page Layout Menu**: Theme selection via Page Layout > Themes menu
             - **UI Theming**: Light/Dark/System app theme via View > Theme
-            - **Chart Integration**: Charts automatically use document theme accent colors
-            - **Table Themes**: 12 auto-generated table themes derived from document theme accents
           files: |
             artifacts/**/*
           draft: false
